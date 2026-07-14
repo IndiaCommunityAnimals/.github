@@ -1,0 +1,84 @@
+name: Bug report
+description: Report a reproducible defect for investigation and evidence-based resolution
+title: "[Bug]: "
+labels: ["bug", "needs reproduction"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Provide enough detail for a human or AI agent to reproduce the problem before proposing a fix. Do not include secrets, tokens, personal data, or production credentials.
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: What is wrong?
+      placeholder: Describe the observed problem clearly.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What currently happens?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide deterministic steps, inputs, URLs, or API calls.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: repository
+    attributes:
+      label: Affected repository
+      options:
+        - Frontend
+        - Backend
+        - Infrastructure
+        - Multiple repositories
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser, device, API environment, commit, deployment, or infrastructure environment.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, screenshots, and evidence
+      description: Add sanitized logs, screenshots, request/response samples, or other useful evidence.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How will we know the bug is fixed?
+      placeholder: |
+        - A regression test reproduces the issue before the fix.
+        - The same test passes after the fix.
+        - Existing tests remain green.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, credentials, tokens, and sensitive personal data from this issue.
+          required: true
