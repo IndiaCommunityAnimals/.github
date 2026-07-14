@@ -1,0 +1,59 @@
+name: Technical task
+description: Define maintenance, refactoring, testing, security, CI, or documentation work
+title: "[Task]: "
+labels: ["technical task"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why is this task needed now?
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: Required work
+      description: Describe the expected change and boundaries.
+    validations:
+      required: true
+  - type: dropdown
+    id: repository
+    attributes:
+      label: Repository scope
+      options:
+        - Frontend
+        - Backend
+        - Infrastructure
+        - Organization .github
+        - Multiple repositories
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Expected output
+      description: List the code, tests, documentation, reports, or configuration that should be delivered.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation and evidence
+      description: Specify commands or proof required before the task is considered complete.
+      placeholder: |
+        - Tests or checks to run
+        - Expected pass result
+        - Before/after evidence where applicable
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risks and constraints
+      description: Include security, compatibility, migration, downtime, or rollout concerns.
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Identify blocked work, related issues, external systems, or required sequencing.
