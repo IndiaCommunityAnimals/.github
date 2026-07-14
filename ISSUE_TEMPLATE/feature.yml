@@ -1,0 +1,65 @@
+name: Feature request
+description: Propose a user or platform capability with clear acceptance criteria
+title: "[Feature]: "
+labels: ["feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What user or business problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal and expected value
+      description: What outcome should this feature create?
+    validations:
+      required: true
+  - type: dropdown
+    id: repository
+    attributes:
+      label: Expected repository scope
+      options:
+        - Frontend
+        - Backend
+        - Infrastructure
+        - Multiple repositories
+        - To be determined
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired user flow, API behavior, or infrastructure outcome without prescribing unnecessary implementation details.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use observable and testable outcomes.
+      placeholder: |
+        - Given ..., when ..., then ...
+        - Automated tests cover the new behavior.
+        - Relevant specifications are updated.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and cross-repository impact
+      description: Identify API, UI, infrastructure, data migration, rollout-order, or external-service dependencies.
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: What should not be included in this change?
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Validation expectations
+      description: What evidence should the implementation PR provide?
+      placeholder: Tests, screenshots, API examples, performance results, Terraform plan, or deployment verification.
