@@ -103,3 +103,4 @@ A change is done when:
 AI agents may plan, implement, test, review, and document changes. Their output must be treated as a proposal supported by reproducible evidence. Agents must not bypass required checks, approve their own work, merge autonomously, or deploy production changes without explicit human authorization.
 
 When a recurring failure or durable engineering lesson is discovered, update the appropriate repository `AGENTS.md`, or the organization `AGENTS.md` when the lesson applies across repositories.
+
