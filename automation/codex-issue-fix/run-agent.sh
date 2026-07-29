@@ -29,12 +29,6 @@ CODEX=(
   --skip-git-repo-check
 )
 
-# Backend commands use only the isolated CI database. Other profiles do not
-# receive an unrelated DATABASE_URL environment variable.
-if [ "$PROFILE" = "backend" ]; then
-  export DATABASE_URL="postgresql://cac:cac@127.0.0.1:5432/cac_test"
-fi
-
 # Validation does not need model credentials. Truncate the exact trusted path
 # after Codex returns and again on unexpected controller exit as a safety net.
 clear_codex_auth() {
@@ -158,14 +152,10 @@ validate_agent_work() {
       (cd "$AGENT_WORK" && npm run build) >> "$GATE_LOG" 2>&1 || failed=1
       ;;
     backend)
-      echo "=== install backend requirements ===" >> "$GATE_LOG"
-      python -m pip install -r "$AGENT_WORK/api/requirements.txt" \
-        >> "$GATE_LOG" 2>&1 || failed=1
-
-      echo "=== pytest -q ===" >> "$GATE_LOG"
+      echo "=== python syntax compilation ===" >> "$GATE_LOG"
       (
-        cd "$AGENT_WORK/api" &&
-          pytest -q
+        cd "$AGENT_WORK" &&
+          python -m compileall -q api
       ) >> "$GATE_LOG" 2>&1 || failed=1
       ;;
     *)

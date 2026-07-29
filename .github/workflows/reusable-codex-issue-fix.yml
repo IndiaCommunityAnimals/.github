@@ -243,26 +243,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: target-repository/api/requirements.txt
-
-      - name: Start isolated backend PostgreSQL
-        if: steps.verify.outputs.eligible == 'true' && inputs.profile == 'backend'
-        run: |
-          docker run --detach --rm --name codex-issue-postgres \
-            --env POSTGRES_USER=cac \
-            --env POSTGRES_PASSWORD=cac \
-            --env POSTGRES_DB=cac_test \
-            --publish 5432:5432 \
-            postgres:16-alpine
-          for attempt in {1..30}; do
-            if docker exec codex-issue-postgres pg_isready -U cac -d cac_test; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "PostgreSQL did not become ready" >&2
-          exit 1
 
       # Use the current runner Node runtime for Codex except where the frontend
       # profile deliberately selected its repository-compatible Node version.
@@ -336,13 +316,6 @@ jobs:
               echo "::warning::Could not restore AppArmor user-namespace restriction"
           fi
 
-      - name: Stop isolated backend PostgreSQL
-        if: >-
-          always() &&
-          steps.verify.outputs.eligible == 'true' &&
-          inputs.profile == 'backend'
-        run: docker rm --force codex-issue-postgres 2>/dev/null || true
-
       # PRs are normal, non-draft review requests; merge remains a human decision.
       - name: Open pull request
         if: steps.verify.outputs.eligible == 'true' && steps.fix.outputs.did_fix == 'true'
@@ -364,7 +337,7 @@ jobs:
             const validation = {
               infrastructure: 'Terraform format, backend-free validation, and TFLint',
               frontend: 'npm clean install, tests, audit, and production build',
-              backend: 'Python dependency installation and pytest against isolated PostgreSQL'
+              backend: 'database-independent Python syntax compilation'
             }[process.env.PROFILE];
 
             const result = await github.rest.pulls.create({

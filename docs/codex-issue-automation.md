@@ -50,7 +50,7 @@ Editing one profile does not change instructions for the other profiles.
 |---|---|---|
 | `infrastructure` | Terraform | fmt, backend-free validate, TFLint |
 | `frontend` | React, TypeScript, Vite | clean install, Vitest, audit, build |
-| `backend` | Python 3.12, Flask, PostgreSQL | dependency install and pytest against isolated PostgreSQL |
+| `backend` | Python 3.12, Flask | database-independent Python syntax compilation |
 
 The controller rejects `.github`, agent policy, real environment files,
 Terraform state, real tfvars, credentials, and files outside the selected
