@@ -1,0 +1,4 @@
+# Organization repositories inherit this chooser unless they define any local
+# file under their own .github/ISSUE_TEMPLATE directory.
+blank_issues_enabled: false
+contact_links: []
