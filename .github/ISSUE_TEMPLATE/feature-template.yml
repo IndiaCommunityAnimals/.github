@@ -1,3 +1,5 @@
+# Shared organization feature form. Cross-repository work should be split into
+# linked implementation issues so each repository receives one reviewable PR.
 name: Feature request
 description: Propose a user or platform capability with clear acceptance criteria
 title: "[Feature]: "
@@ -33,7 +35,7 @@ body:
     id: proposal
     attributes:
       label: Proposed behavior
-      description: Describe the desired user flow, API behavior, or infrastructure outcome without prescribing unnecessary implementation details.
+      description: Describe the desired behavior without prescribing unnecessary implementation details.
     validations:
       required: true
   - type: textarea
@@ -41,17 +43,13 @@ body:
     attributes:
       label: Acceptance criteria
       description: Use observable and testable outcomes.
-      placeholder: |
-        - Given ..., when ..., then ...
-        - Automated tests cover the new behavior.
-        - Relevant specifications are updated.
     validations:
       required: true
   - type: textarea
     id: dependencies
     attributes:
       label: Dependencies and cross-repository impact
-      description: Identify API, UI, infrastructure, data migration, rollout-order, or external-service dependencies.
+      description: Identify API, UI, infrastructure, rollout, migration, or external-service dependencies.
   - type: textarea
     id: out_of_scope
     attributes:
@@ -62,4 +60,3 @@ body:
     attributes:
       label: Validation expectations
       description: What evidence should the implementation PR provide?
-      placeholder: Tests, screenshots, API examples, performance results, Terraform plan, or deployment verification.

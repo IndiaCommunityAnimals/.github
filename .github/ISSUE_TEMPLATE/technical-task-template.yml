@@ -1,3 +1,5 @@
+# Shared maintenance form for work that will be implemented manually or through
+# a normal engineering process rather than the Codex issue-to-PR workflow.
 name: Technical task
 description: Define maintenance, refactoring, testing, security, CI, or documentation work
 title: "[Task]: "
@@ -33,18 +35,14 @@ body:
     id: output
     attributes:
       label: Expected output
-      description: List the code, tests, documentation, reports, or configuration that should be delivered.
+      description: List the code, tests, documentation, reports, or configuration to deliver.
     validations:
       required: true
   - type: textarea
     id: validation
     attributes:
       label: Validation and evidence
-      description: Specify commands or proof required before the task is considered complete.
-      placeholder: |
-        - Tests or checks to run
-        - Expected pass result
-        - Before/after evidence where applicable
+      description: Specify commands or proof required before completion.
     validations:
       required: true
   - type: textarea
