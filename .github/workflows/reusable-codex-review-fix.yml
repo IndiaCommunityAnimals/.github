@@ -125,16 +125,23 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
 
+      # Plain JSON, not base64 — matches how reusable-codex-issue-fix.yml's
+      # "Restore Codex agent authentication" step reads the same secret name,
+      # so one CODEX_AUTH_JSON value works for both automations in a repo
+      # instead of needing two differently-encoded copies of a credential
+      # that already has to be re-seeded by hand on rotation.
       - name: Seed Codex auth
+        id: codex-auth
         env:
-          CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
         run: |
-          if [ -z "$CODEX_AUTH_JSON_B64" ]; then
+          if [ -z "$CODEX_AUTH_JSON" ]; then
             echo "::error::CODEX_AUTH_JSON secret is empty."; exit 1
           fi
           mkdir -p ~/.codex
-          echo "$CODEX_AUTH_JSON_B64" | base64 -d > ~/.codex/auth.json
+          printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
           chmod 600 ~/.codex/auth.json
+          echo "auth_file=${HOME}/.codex/auth.json" >> "$GITHUB_OUTPUT"
 
       - name: Install Codex CLI
         # Pinned so behavior/output can't silently shift when a new CLI release
@@ -144,6 +151,20 @@ jobs:
       - name: Run review-fix loop
         id: loop
         run: bash "${{ github.workspace }}/organization-automation/automation/codex-review-fix/run-loop.sh"
+
+      # Mirrors reusable-codex-issue-fix.yml's own cleanup step: the credential
+      # only needs to exist for the run above, not for the rest of the job
+      # (delivery steps below use GH_TOKEN/github.token, never Codex auth).
+      # if: always() so this still runs even if the loop step failed or timed out.
+      - name: Remove Codex authentication file
+        if: always() && steps.codex-auth.outcome == 'success'
+        env:
+          CODEX_AUTH_FILE: ${{ steps.codex-auth.outputs.auth_file }}
+        run: |
+          if [ -n "$CODEX_AUTH_FILE" ] && [ -f "$CODEX_AUTH_FILE" ]; then
+            : > "$CODEX_AUTH_FILE"
+            rm --force -- "$CODEX_AUTH_FILE"
+          fi
 
       # Delivery: fixes are already committed and pushed to the PR's own
       # branch. Post/update one comment on the PR with the review findings +
