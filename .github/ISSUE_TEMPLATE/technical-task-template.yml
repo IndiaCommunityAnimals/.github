@@ -1,5 +1,5 @@
-# Shared maintenance form. The request label starts one implementation PR in
-# the repository where the issue is created.
+# Shared maintenance form. The required target branch starts one implementation
+# PR in the repository where the issue is created.
 name: Technical task
 description: Request maintenance, refactoring, testing, CI, or documentation work in a pull request
 title: "[Task]: "

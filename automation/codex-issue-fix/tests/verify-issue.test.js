@@ -4,6 +4,7 @@
 // author boundary used before Codex receives any repository access.
 const assert = require('node:assert/strict');
 const {
+  automationLabelsForIssue,
   extractTargetBranch,
   isTrustedAssociation,
   validateIssue
@@ -31,6 +32,23 @@ assert.equal(isTrustedAssociation('MEMBER'), true);
 assert.equal(isTrustedAssociation('COLLABORATOR'), true);
 assert.equal(isTrustedAssociation('CONTRIBUTOR'), false);
 assert.equal(isTrustedAssociation('NONE'), false);
+
+assert.deepEqual(
+  automationLabelsForIssue({ title: '[Bug]: Broken behavior' }),
+  ['codex-fix-requested', 'bug', 'needs reproduction']
+);
+assert.deepEqual(
+  automationLabelsForIssue({ title: '[Feature]: New behavior' }),
+  ['codex-fix-requested', 'feature']
+);
+assert.deepEqual(
+  automationLabelsForIssue({ title: '[Task]: Maintenance work' }),
+  ['codex-fix-requested', 'technical task']
+);
+assert.deepEqual(
+  automationLabelsForIssue({ title: 'Custom implementation request' }),
+  ['codex-fix-requested']
+);
 
 assert.deepEqual(
   validateIssue({ title: 'A descriptive issue title', body: 'A'.repeat(80) }),

@@ -1,5 +1,5 @@
-# Shared non-automation form. It deliberately has no codex-fix-requested label
-# or target branch, so repository caller workflows ignore issues from this form.
+# Shared non-automation form. It deliberately has no target branch, so
+# repository caller workflows ignore issues from this form.
 name: General issue or discussion
 description: Ask a question or record a discussion without creating a Codex pull request
 title: "[Discussion]: "

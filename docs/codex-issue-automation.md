@@ -42,14 +42,18 @@ Organization repositories inherit these forms when they do not define a local
 | **Technical task** | Yes | Target branch, context, required change, acceptance criteria, and validation |
 | **General issue or discussion** | No | Question/topic, context, and desired discussion outcome |
 
-The three implementation forms automatically add `codex-fix-requested`. They
-also require a safety confirmation that secrets, credentials, tokens, and
-sensitive personal data were removed. Supporting evidence, dependencies,
-constraints, risks, and out-of-scope details are available where relevant.
+The three implementation forms contain a required **Target branch** field. That
+field starts the caller workflow even when the repository has not provisioned
+the template's labels yet. The shared workflow creates any missing category,
+`codex-fix-requested`, and `codex-fix-approved` labels in the caller repository,
+then applies the request and category labels to the issue.
 
-The General Issue or Discussion form deliberately has no target branch and no
-`codex-fix-requested` label. It is intended for questions, investigation,
-planning, and decisions that should not create a code change.
+All forms require a safety confirmation that secrets, credentials, tokens, and
+sensitive personal data were removed. Supporting evidence, dependencies,
+constraints, risks, and out-of-scope details are available where relevant. The
+General Issue or Discussion form deliberately has no target branch. It is
+intended for questions, investigation, planning, and decisions that should not
+create a code change.
 
 ### Why there is no repository dropdown
 
@@ -122,7 +126,12 @@ that evidence before merging.
 The **Bug report**, **Feature request**, and **Technical task** forms all request
 automation. In a repository with a caller workflow, each valid issue requests
 one Codex implementation PR. The **General issue or discussion** form is
-ignored by the caller because it does not carry `codex-fix-requested`.
+ignored by the caller because it does not contain a target-branch field.
+
+Labels are metadata, not the trigger. Caller workflows start on an implementation
+issue's target-branch field, and the reusable workflow provisions and attaches
+the appropriate labels. This avoids GitHub's behavior of silently omitting Issue
+Form labels that do not already exist in the repository.
 
 Owners, organization members, and collaborators can proceed after validation.
 An external contributor requires a maintainer to add `codex-fix-approved`.
@@ -135,12 +144,9 @@ For each caller repository:
 1. Enable GitHub Actions.
 2. Allow read/write workflow permissions.
 3. Enable **Allow GitHub Actions to create and approve pull requests**.
-4. Add `bug`, `needs reproduction`, `feature`, `technical task`,
-   `codex-fix-requested`, and `codex-fix-approved` labels to both the
-   organization `.github` repository and each caller.
-5. Permit `codex/issue-*` branch creation under repository rulesets.
-6. Grant the organization `CODEX_AUTH_JSON` secret to the repository.
-7. Keep the caller workflow on the repository default branch.
+4. Permit `codex/issue-*` branch creation under repository rulesets.
+5. Grant the organization `CODEX_AUTH_JSON` secret to the repository.
+6. Keep the caller workflow on the repository default branch.
 
 Only `CODEX_AUTH_JSON` is passed explicitly. The caller does not use
 `secrets: inherit`, so unrelated organization or repository secrets are not
@@ -151,7 +157,7 @@ made available to the reusable workflow.
 1. Merge and validate the organization `.github` repository first.
 2. Confirm organization-default issue forms appear in a repository without a
    local `.github/ISSUE_TEMPLATE` directory.
-3. Create required labels and configure the organization secret access.
+3. Configure the organization secret access and repository workflow permissions.
 4. Merge the infrastructure caller and test a small repository-local issue
    using one of the three organization forms.
 5. After the infrastructure pilot succeeds, add callers to frontend and backend.
