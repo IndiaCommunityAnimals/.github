@@ -1,41 +1,37 @@
-# Shared organization feature form. Cross-repository work should be split into
-# linked implementation issues so each repository receives one reviewable PR.
+# Shared organization feature form. The request label starts one implementation
+# PR; cross-repository work must be split into linked repository-local issues.
 name: Feature request
-description: Propose a user or platform capability with clear acceptance criteria
+description: Request a user or platform capability for Codex to implement in a pull request
 title: "[Feature]: "
-labels: ["feature"]
+labels: ["feature", "codex-fix-requested"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        This form starts issue-to-PR automation in the repository where the
+        issue is created. Split cross-repository work into one linked issue per
+        repository, and never include secrets or production credentials.
+  # Every automation run must resolve one existing base branch before checkout.
+  - type: input
+    id: target_branch
+    attributes:
+      label: Target branch
+      description: Existing branch that the generated pull request should target.
+      placeholder: main
+    validations:
+      required: true
   - type: textarea
     id: problem
     attributes:
-      label: Problem statement
-      description: What user or business problem should be solved?
+      label: Problem and context
+      description: Explain the need, who is affected, and why the feature is valuable.
     validations:
       required: true
   - type: textarea
-    id: goal
+    id: desired_behavior
     attributes:
-      label: Goal and expected value
-      description: What outcome should this feature create?
-    validations:
-      required: true
-  - type: dropdown
-    id: repository
-    attributes:
-      label: Expected repository scope
-      options:
-        - Frontend
-        - Backend
-        - Infrastructure
-        - Multiple repositories
-        - To be determined
-    validations:
-      required: true
-  - type: textarea
-    id: proposal
-    attributes:
-      label: Proposed behavior
-      description: Describe the desired behavior without prescribing unnecessary implementation details.
+      label: Desired behavior
+      description: Describe what users or systems should be able to do after implementation.
     validations:
       required: true
   - type: textarea
@@ -43,6 +39,10 @@ body:
     attributes:
       label: Acceptance criteria
       description: Use observable and testable outcomes.
+      placeholder: |
+        - The requested capability is available.
+        - Existing behavior remains compatible.
+        - Relevant repository checks pass.
     validations:
       required: true
   - type: textarea
@@ -58,5 +58,19 @@ body:
   - type: textarea
     id: evidence
     attributes:
-      label: Validation expectations
-      description: What evidence should the implementation PR provide?
+      label: Validation and evidence
+      description: Specify the checks and evidence the generated pull request must provide.
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and constraints
+      description: Note security, compatibility, data, migration, rollout, or implementation constraints.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, credentials, tokens, and sensitive personal data from this issue.
+          required: true

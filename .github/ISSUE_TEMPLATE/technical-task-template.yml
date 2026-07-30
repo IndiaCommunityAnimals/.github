@@ -1,41 +1,48 @@
-# Shared maintenance form for work that will be implemented manually or through
-# a normal engineering process rather than the Codex issue-to-PR workflow.
+# Shared maintenance form. The request label starts one implementation PR in
+# the repository where the issue is created.
 name: Technical task
-description: Define maintenance, refactoring, testing, security, CI, or documentation work
+description: Request maintenance, refactoring, testing, CI, or documentation work in a pull request
 title: "[Task]: "
-labels: ["technical task"]
+labels: ["technical task", "codex-fix-requested"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        This form starts issue-to-PR automation in the repository where the
+        issue is created. Keep the task limited to one repository and do not
+        include secrets, tokens, personal data, or production credentials.
+  # Every automation run must resolve one existing base branch before checkout.
+  - type: input
+    id: target_branch
+    attributes:
+      label: Target branch
+      description: Existing branch that the generated pull request should target.
+      placeholder: main
+    validations:
+      required: true
   - type: textarea
     id: context
     attributes:
       label: Context
-      description: Why is this task needed now?
+      description: Explain why this work is needed and describe the current state.
     validations:
       required: true
   - type: textarea
     id: task
     attributes:
-      label: Required work
-      description: Describe the expected change and boundaries.
-    validations:
-      required: true
-  - type: dropdown
-    id: repository
-    attributes:
-      label: Repository scope
-      options:
-        - Frontend
-        - Backend
-        - Infrastructure
-        - Organization .github
-        - Multiple repositories
+      label: Required change
+      description: Describe exactly what must change without prescribing unrelated cleanup.
     validations:
       required: true
   - type: textarea
-    id: output
+    id: acceptance
     attributes:
-      label: Expected output
-      description: List the code, tests, documentation, reports, or configuration to deliver.
+      label: Acceptance criteria
+      description: List the observable outcomes required for this task to be complete.
+      placeholder: |
+        - The requested change is implemented.
+        - Existing behavior remains compatible.
+        - Relevant repository checks pass.
     validations:
       required: true
   - type: textarea
@@ -48,10 +55,17 @@ body:
   - type: textarea
     id: risk
     attributes:
-      label: Risks and constraints
-      description: Include security, compatibility, migration, downtime, or rollout concerns.
+      label: Constraints and out of scope
+      description: State what must not change and anything intentionally excluded from this task.
   - type: textarea
     id: dependencies
     attributes:
       label: Dependencies
       description: Identify blocked work, related issues, external systems, or required sequencing.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, credentials, tokens, and sensitive personal data from this issue.
+          required: true

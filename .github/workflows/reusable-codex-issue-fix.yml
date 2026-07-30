@@ -95,7 +95,9 @@ jobs:
               problems.push(`Unsupported repository profile: ${process.env.PROFILE}`);
             }
             if (!requested) {
-              problems.push('Use the Automated Codex implementation issue form.');
+              problems.push(
+                'Use the organization Bug, Feature, or Technical Task issue form.'
+              );
             }
             if (!targetBranch) {
               problems.push('Add a `### Target branch` section containing one branch name.');
@@ -216,7 +218,8 @@ jobs:
           path: target-repository
           fetch-depth: 0
 
-      # Stack setup is profile-specific; no Terraform tooling is installed for app fixes.
+      # Only infrastructure validation needs centrally installed stack tooling.
+      # Application repositories are inspected by Codex without runtime assumptions.
       - name: Set up Terraform
         if: steps.verify.outputs.eligible == 'true' && inputs.profile == 'infrastructure'
         uses: hashicorp/setup-terraform@v4
@@ -230,22 +233,8 @@ jobs:
             https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh |
             bash
 
-      - name: Set up frontend Node.js
-        if: steps.verify.outputs.eligible == 'true' && inputs.profile == 'frontend'
-        uses: actions/setup-node@v6
-        with:
-          # Match the frontend repository's existing test workflow runtime.
-          node-version: "20"
-          package-manager-cache: false
-
-      - name: Set up backend Python
-        if: steps.verify.outputs.eligible == 'true' && inputs.profile == 'backend'
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      # Use the current runner Node runtime for Codex except where the frontend
-      # profile deliberately selected its repository-compatible Node version.
+      # Codex uses the current GitHub runner Node runtime. The shared workflow
+      # does not select an application language or framework runtime.
       - name: Install Codex CLI
         if: steps.verify.outputs.eligible == 'true'
         run: npm install --global @openai/codex
@@ -336,8 +325,8 @@ jobs:
               .slice(0, 180);
             const validation = {
               infrastructure: 'Terraform format, backend-free validation, and TFLint',
-              frontend: 'npm clean install, tests, audit, and production build',
-              backend: 'database-independent Python syntax compilation'
+              frontend: 'repository-discovered checks and central patch-safety gates',
+              backend: 'repository-discovered checks and central patch-safety gates'
             }[process.env.PROFILE];
 
             const result = await github.rest.pulls.create({
