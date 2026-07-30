@@ -1,8 +1,7 @@
 # Reusable organization workflow. Repository-local callers own the pull_request
 # event and token permissions; this file owns review, negotiation, fix, gate,
-# and delivery logic. Sibling to reusable-codex-issue-fix.yml — that workflow
-# takes a verified issue to a PR; this one reviews and improves a PR that
-# already exists, whichever automation or human opened it.
+# and delivery logic. Reviews and improves a pull request that already
+# exists, whichever automation or human opened it.
 name: Reusable Codex Review-Fix Loop
 
 on:
@@ -69,15 +68,22 @@ permissions:
 concurrency:
   # Include the repository because PR numbers repeat across repositories.
   group: codex-review-fix-${{ github.repository }}-${{ github.event.pull_request.number }}
-  # Unlike the issue-fix workflow, do NOT cancel an in-progress run: a queued
-  # concurrent run pushing to the same branch mid-loop caused a race we hit
-  # and fixed during development. One loop at a time per PR, run to completion.
+  # Do NOT cancel an in-progress run: a queued concurrent run pushing to the
+  # same branch mid-loop caused a race that was hit and fixed during
+  # development. One loop at a time per PR, run to completion.
   cancel-in-progress: false
 
 jobs:
   loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Worst case with the default inputs is up to ~26 Codex CLI calls in one
+    # run: MAX_FIX_ROUNDS (2) rounds, each up to 1 review + MAX_NEGOTIATION_ROUNDS
+    # (5) negotiation exchanges (2 calls each) + 1 fix, plus one final
+    # confirming review and one evidence-generation call. Real per-call
+    # latency varies with diff size and finding count, so this is generous
+    # rather than tight — bounds a genuinely hung run without being sized for
+    # a single-call job.
+    timeout-minutes: 90
     env:
       PROFILE: ${{ inputs.profile }}
       SRC_BRANCH: ${{ github.head_ref }}
@@ -125,11 +131,9 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
 
-      # Plain JSON, not base64 — matches how reusable-codex-issue-fix.yml's
-      # "Restore Codex agent authentication" step reads the same secret name,
-      # so one CODEX_AUTH_JSON value works for both automations in a repo
-      # instead of needing two differently-encoded copies of a credential
-      # that already has to be re-seeded by hand on rotation.
+      # CODEX_AUTH_JSON holds the raw contents of ~/.codex/auth.json (plain
+      # JSON, not base64 — it's passed through env:, not interpolated into a
+      # shell string, so no extra encoding is needed for it to be safe).
       - name: Seed Codex auth
         id: codex-auth
         env:
@@ -152,10 +156,10 @@ jobs:
         id: loop
         run: bash "${{ github.workspace }}/organization-automation/automation/codex-review-fix/run-loop.sh"
 
-      # Mirrors reusable-codex-issue-fix.yml's own cleanup step: the credential
-      # only needs to exist for the run above, not for the rest of the job
-      # (delivery steps below use GH_TOKEN/github.token, never Codex auth).
-      # if: always() so this still runs even if the loop step failed or timed out.
+      # The credential only needs to exist for the run above, not for the
+      # rest of the job (delivery steps below use GH_TOKEN/github.token,
+      # never Codex auth). if: always() so this still runs even if the loop
+      # step failed or timed out.
       - name: Remove Codex authentication file
         if: always() && steps.codex-auth.outcome == 'success'
         env:

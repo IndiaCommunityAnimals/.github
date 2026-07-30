@@ -21,10 +21,8 @@
 #
 # Profiles (backend, frontend, ...) are a fixed enum selecting the scope
 # prefix, install step, Gate B validation command, and the fix prompt's
-# stack-specific rules — mirrors how automation/codex-issue-fix/run-agent.sh
-# switches is_allowed_path()/validate_agent_work() on PROFILE. Adding a stack
-# means adding a case here deliberately, not accepting an arbitrary caller-
-# supplied path or command.
+# stack-specific rules. Adding a stack means adding a case here
+# deliberately, not accepting an arbitrary caller-supplied path or command.
 #
 # Hardening (all from the loop reviewing itself):
 #  * All scratch files live in $WORK, OUTSIDE the repo tree, so Gate A can't
