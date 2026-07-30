@@ -1,0 +1,243 @@
+# Reusable organization workflow. Repository-local callers own the pull_request
+# event and token permissions; this file owns review, negotiation, fix, gate,
+# and delivery logic. Sibling to reusable-codex-issue-fix.yml — that workflow
+# takes a verified issue to a PR; this one reviews and improves a PR that
+# already exists, whichever automation or human opened it.
+name: Reusable Codex Review-Fix Loop
+
+on:
+  workflow_call:
+    inputs:
+      # Profiles select the scope prefix, install step, Gate B validation
+      # command, and stack-specific fix-prompt rules — see run-loop.sh.
+      profile:
+        description: backend or frontend
+        required: true
+        type: string
+      # Keep script checkout aligned with the reusable workflow reference.
+      automation_ref:
+        description: Branch, tag, or SHA in IndiaCommunityAnimals/.github
+        required: false
+        default: main
+        type: string
+      max_fix_rounds:
+        description: Review -> negotiate -> fix rounds before giving up
+        required: false
+        default: 2
+        type: number
+      max_negotiation_rounds:
+        description: Fixer<->reviewer exchanges allowed within one fix round
+        required: false
+        default: 5
+        type: number
+      deletion_line_threshold:
+        description: Flag a round that removes more than this many lines
+        required: false
+        default: 30
+        type: number
+      deletion_ratio:
+        description: ...or removes this many times more than it adds
+        required: false
+        default: 3
+        type: number
+      codex_cli_version:
+        description: Pinned @openai/codex npm version
+        required: false
+        default: "0.145.0"
+        type: string
+      python_version:
+        description: Used when profile is backend
+        required: false
+        default: "3.12"
+        type: string
+      node_version:
+        description: Used when profile is frontend
+        required: false
+        default: "20"
+        type: string
+    secrets:
+      # Pass only Codex authentication; do not inherit unrelated organization
+      # or repository secrets.
+      CODEX_AUTH_JSON:
+        required: true
+
+# A caller must grant the same permissions; reusable workflows cannot elevate them.
+permissions:
+  contents: write        # push fixes directly to the PR's own branch
+  pull-requests: write   # post/update the review + evidence comment
+
+concurrency:
+  # Include the repository because PR numbers repeat across repositories.
+  group: codex-review-fix-${{ github.repository }}-${{ github.event.pull_request.number }}
+  # Unlike the issue-fix workflow, do NOT cancel an in-progress run: a queued
+  # concurrent run pushing to the same branch mid-loop caused a race we hit
+  # and fixed during development. One loop at a time per PR, run to completion.
+  cancel-in-progress: false
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PROFILE: ${{ inputs.profile }}
+      SRC_BRANCH: ${{ github.head_ref }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      MAX_FIX_ROUNDS: ${{ inputs.max_fix_rounds }}
+      MAX_NEGOTIATION_ROUNDS: ${{ inputs.max_negotiation_rounds }}
+      DELETION_LINE_THRESHOLD: ${{ inputs.deletion_line_threshold }}
+      DELETION_RATIO: ${{ inputs.deletion_ratio }}
+      REPOSITORY_ROOT: ${{ github.workspace }}/target-repository
+    steps:
+      # Central control files (script + prompts) come from the requested
+      # reviewed automation ref, never from the PR — a same-repo PR author
+      # cannot alter review/fix logic in their own PR. This also closes a gap
+      # the single-repo version of this loop had to leave open: there, the
+      # *workflow YAML* still came from the PR head, because `pull_request`
+      # always sources it that way for a same-repo caller. Now that the real
+      # logic lives here instead, each caller shrinks to a thin `uses:`
+      # pointer with nothing left worth tampering with.
+      - name: Check out trusted organization automation
+        uses: actions/checkout@v6
+        with:
+          repository: IndiaCommunityAnimals/.github
+          ref: ${{ inputs.automation_ref }}
+          path: organization-automation
+          fetch-depth: 1
+          persist-credentials: false
+
+      # The PR's actual branch (not GitHub's synthetic merge ref) — fixes need
+      # to be pushed back to it directly.
+      - name: Check out PR head (pushable)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: target-repository
+
+      - uses: actions/setup-python@v6
+        if: inputs.profile == 'backend'
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - uses: actions/setup-node@v6
+        if: inputs.profile == 'frontend'
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Seed Codex auth
+        env:
+          CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          if [ -z "$CODEX_AUTH_JSON_B64" ]; then
+            echo "::error::CODEX_AUTH_JSON secret is empty."; exit 1
+          fi
+          mkdir -p ~/.codex
+          echo "$CODEX_AUTH_JSON_B64" | base64 -d > ~/.codex/auth.json
+          chmod 600 ~/.codex/auth.json
+
+      - name: Install Codex CLI
+        # Pinned so behavior/output can't silently shift when a new CLI release
+        # ships; bump inputs.codex_cli_version above to update deliberately.
+        run: npm install -g "@openai/codex@${{ inputs.codex_cli_version }}"
+
+      - name: Run review-fix loop
+        id: loop
+        run: bash "${{ github.workspace }}/organization-automation/automation/codex-review-fix/run-loop.sh"
+
+      # Delivery: fixes are already committed and pushed to the PR's own
+      # branch. Post/update one comment on the PR with the review findings +
+      # evidence for what changed. Uses GITHUB_TOKEN only (no PAT / write
+      # secret), so it works even where the org blocks Actions from creating PRs.
+      - name: Post review + fix evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_PR: ${{ github.event.pull_request.number }}
+          DID_FIX: ${{ steps.loop.outputs.did_fix }}
+          FIX_COUNT: ${{ steps.loop.outputs.fix_count }}
+          STOP_REASON: ${{ steps.loop.outputs.stop_reason }}
+          DELETIONS: ${{ steps.loop.outputs.deletions_flagged }}
+          HAS_CLEANUP: ${{ steps.loop.outputs.has_cleanup_notes }}
+          HAS_NEGOTIATION: ${{ steps.loop.outputs.has_negotiation_notes }}
+        run: |
+          WORK="${RUNNER_TEMP}/codex-review-fix"
+          MARKER="<!-- codex-loop -->"
+          {
+            echo "$MARKER"
+            echo "## 🤖 Codex Review–Fix"
+            echo
+            if [ "$DELETIONS" = "true" ]; then
+              echo "> ⚠️ **This fix deletes code.** Review the flagged deletions and their rationale carefully before merging."
+              echo
+            fi
+            echo "### 🔍 Review findings"
+            echo
+            # The evidence below (if any) documents the FIX, not the original
+            # findings — surface what Codex actually found on the first pass
+            # (before any auto-fix round) explicitly, so this isn't just a
+            # list of changes with no visible "why".
+            if [ -s "${WORK}/review-1.md" ]; then
+              cat "${WORK}/review-1.md"
+            else
+              echo "_(no review output captured)_"
+            fi
+            echo
+            echo "---"
+            echo
+            if [ "$DID_FIX" = "true" ]; then
+              echo "> 🔄 **Codex pushed ${FIX_COUNT} fix(es) directly to this branch.** If this PR was already approved, re-review the new commits before merging."
+              echo
+              echo "_Stopped: ${STOP_REASON}_"
+              echo
+              echo "---"
+              cat "${WORK}/evidence.md" 2>/dev/null || echo "_(evidence unavailable)_"
+              if [ -s "${WORK}/review-final.md" ]; then
+                echo
+                echo "---"
+                echo "### 🔁 Final confirming review (after the last round)"
+                cat "${WORK}/review-final.md"
+              fi
+              echo
+              echo "<sub>Fixes generated autonomously and committed directly to this branch; review before merging.</sub>"
+            else
+              echo "Reviewed — no auto-fix pushed. _(${STOP_REASON})_"
+            fi
+            if [ "$HAS_NEGOTIATION" = "true" ]; then
+              echo
+              echo "---"
+              echo "### 🗣️ Reviewer ↔ fixer negotiation"
+              echo "The fixer pushed back on some findings before any change was made. Here's the discussion and the reviewer's final ruling — only the surviving findings were actually applied above."
+              echo
+              cat "${WORK}/negotiation.md" 2>/dev/null || true
+            fi
+            if [ "$HAS_CLEANUP" = "true" ]; then
+              echo
+              echo "---"
+              echo "### 🧹 Possible cleanup candidates (NOT applied)"
+              echo "Codex considered deleting these files entirely. Whole-file deletion is never applied automatically — a file may be needed by other in-flight work this automation can't see. Its own reasoning is included so a human can evaluate and delete manually if warranted."
+              echo
+              cat "${WORK}/cleanup-candidates.md" 2>/dev/null || true
+            fi
+          } > comment.md
+
+          # --paginate: without it only the first page of comments is fetched,
+          # and on an active PR our marker comment could be past page 1 —
+          # missing it would create a duplicate instead of updating in place.
+          # --jq runs its filter PER PAGE (not once on the combined result), so
+          # multi-page output is multiple lines (e.g. "null\n<id>") — an invalid
+          # CID that would break the PATCH below. --slurp fixes that but isn't
+          # supported together with --jq, so pipe to a separate jq instead,
+          # flattening the array-of-pages with .[][] before filtering.
+          # Also require the comment's author to be this bot: matching on body
+          # prefix alone means anyone who posts a comment starting with the
+          # marker text gets matched and overwritten — GITHUB_TOKEN with
+          # pull-requests:write can PATCH any comment on the repo, not just its
+          # own, so this isn't merely a lookup miss, it can clobber someone
+          # else's comment.
+          CID=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues/${SOURCE_PR}/comments" 2>/dev/null \
+            | jq -r "[.[][] | select(.user.login==\"github-actions[bot]\" and (.body|startswith(\"$MARKER\")))][0].id")
+          if [ -n "$CID" ] && [ "$CID" != "null" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${CID}" -f body="$(cat comment.md)" >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${SOURCE_PR}/comments" -f body="$(cat comment.md)" >/dev/null
+          fi
