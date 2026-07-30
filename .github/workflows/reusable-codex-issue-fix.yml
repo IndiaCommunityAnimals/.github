@@ -63,6 +63,79 @@ jobs:
       - name: Test issue verifier
         run: node organization-automation/automation/codex-issue-fix/tests/verify-issue.test.js
 
+      # Issue Forms only apply labels that already exist. Provision them inside
+      # the caller repository so missing setup never prevents an implementation run.
+      - name: Ensure automation labels
+        uses: actions/github-script@v8
+        env:
+          VERIFIER_PATH: ${{ github.workspace }}/organization-automation/automation/codex-issue-fix/verify-issue.js
+        with:
+          script: |
+            const {
+              automationLabelsForIssue
+            } = require(process.env.VERIFIER_PATH);
+
+            const definitions = {
+              'bug': {
+                color: 'd73a4a',
+                description: 'Something is not working'
+              },
+              'needs reproduction': {
+                color: 'fbca04',
+                description: 'Issue needs reproducible steps or evidence'
+              },
+              'feature': {
+                color: 'a2eeef',
+                description: 'New feature or enhancement request'
+              },
+              'technical task': {
+                color: '5319e7',
+                description: 'Engineering or maintenance task'
+              },
+              'codex-fix-requested': {
+                color: '0e8a16',
+                description: 'Requests automated Codex implementation'
+              },
+              [process.env.APPROVAL_LABEL]: {
+                color: '1d76db',
+                description: 'Maintainer approval for external contributor automation'
+              }
+            };
+
+            for (const [name, definition] of Object.entries(definitions)) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name
+                });
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name,
+                    ...definition
+                  });
+                } catch (createError) {
+                  // Another issue run may have created the same label concurrently.
+                  if (createError.status !== 422) {
+                    throw createError;
+                  }
+                }
+              }
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: automationLabelsForIssue(context.payload.issue)
+            });
+
       - name: Verify issue and target branch
         id: verify
         uses: actions/github-script@v8
@@ -88,16 +161,10 @@ jobs:
             const targetBranch = extractTargetBranch(issue.body || '');
             const trusted = isTrustedAssociation(issue.author_association);
             const approved = labels.includes(process.env.APPROVAL_LABEL);
-            const requested = labels.includes('codex-fix-requested');
             const problems = [...validation.problems];
 
             if (!allowedProfiles.has(process.env.PROFILE)) {
               problems.push(`Unsupported repository profile: ${process.env.PROFILE}`);
-            }
-            if (!requested) {
-              problems.push(
-                'Use the organization Bug, Feature, or Technical Task issue form.'
-              );
             }
             if (!targetBranch) {
               problems.push('Add a `### Target branch` section containing one branch name.');

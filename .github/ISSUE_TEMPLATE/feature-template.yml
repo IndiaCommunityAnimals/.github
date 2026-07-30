@@ -1,5 +1,5 @@
-# Shared organization feature form. The request label starts one implementation
-# PR; cross-repository work must be split into linked repository-local issues.
+# Shared organization feature form. The required target branch starts one
+# implementation PR; labels are added automatically if absent.
 name: Feature request
 description: Request a user or platform capability for Codex to implement in a pull request
 title: "[Feature]: "

@@ -11,6 +11,10 @@ produce one reviewable pull request when the repository caller is configured.
 The General Issue or Discussion form is the non-automation path and never
 requests a code change or pull request.
 
+Automation starts from the implementation forms' required target-branch field,
+not from a pre-existing label. The shared workflow creates missing category and
+automation labels in the caller repository and attaches them to the issue.
+
 The forms do not ask users to select Infrastructure, Frontend, Backend, or any
 other fixed repository category. GitHub already identifies the repository from
 where the issue is created, and that repository's caller selects its own

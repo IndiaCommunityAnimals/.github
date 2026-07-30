@@ -1,5 +1,5 @@
-# Shared organization bug form. The request label starts the repository's
-# issue-to-PR caller after the required target branch and issue data are verified.
+# Shared organization bug form. The required target branch starts the
+# repository's issue-to-PR caller; labels are added automatically if absent.
 name: Bug report
 description: Report a reproducible defect for Codex to fix in a pull request
 title: "[Bug]: "

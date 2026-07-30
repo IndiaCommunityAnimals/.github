@@ -34,6 +34,23 @@ function isTrustedAssociation(association) {
   return TRUSTED_ASSOCIATIONS.has(association);
 }
 
+// Labels are useful review metadata but are not the automation trigger. The
+// workflow provisions and applies them after the target-branch field starts it.
+function automationLabelsForIssue(issue) {
+  const title = (issue.title || '').trim();
+  const labels = ['codex-fix-requested'];
+
+  if (/^\[Bug\]:/i.test(title)) {
+    labels.push('bug', 'needs reproduction');
+  } else if (/^\[Feature\]:/i.test(title)) {
+    labels.push('feature');
+  } else if (/^\[Task\]:/i.test(title)) {
+    labels.push('technical task');
+  }
+
+  return labels;
+}
+
 // Issue Forms enforce detailed fields in the UI; these checks protect API-made
 // or manually edited issues from starting an underspecified agent run.
 function validateIssue(issue) {
@@ -55,6 +72,7 @@ function validateIssue(issue) {
 
 // Export only deterministic helpers; GitHub API operations stay in the workflow.
 module.exports = {
+  automationLabelsForIssue,
   extractTargetBranch,
   isTrustedAssociation,
   validateIssue
