@@ -156,11 +156,6 @@ EOF
   esac
 }
 
-# Everything below this point is shared control flow — identical for every
-# profile. This is the part consolidation actually buys: one negotiation
-# protocol, one set of gates, one evidence/push path, instead of two files
-# kept in sync by hand.
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${RUNNER_TEMP:-/tmp}/codex-review-fix"; mkdir -p "$WORK"
 PROMPT_FILE="$SCRIPT_DIR/prompts/review.md"           # shared across every profile — see README
