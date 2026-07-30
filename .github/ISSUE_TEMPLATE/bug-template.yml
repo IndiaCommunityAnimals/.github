@@ -1,34 +1,44 @@
-# Shared organization bug form. This creates a normal issue and does not start
-# Codex automation; use codex-fix-template.yml when automated implementation is wanted.
+# Shared organization bug form. The request label starts the repository's
+# issue-to-PR caller after the required target branch and issue data are verified.
 name: Bug report
-description: Report a reproducible defect for investigation and evidence-based resolution
+description: Report a reproducible defect for Codex to fix in a pull request
 title: "[Bug]: "
-labels: ["bug", "needs reproduction"]
+labels: ["bug", "needs reproduction", "codex-fix-requested"]
 body:
   - type: markdown
     attributes:
       value: |
-        Provide enough detail to reproduce the problem. Do not include secrets,
-        tokens, personal data, or production credentials.
-  - type: textarea
-    id: description
+        This form starts issue-to-PR automation in the repository where the
+        issue is created. Provide enough detail to reproduce the problem. Do
+        not include secrets, tokens, personal data, or production credentials.
+  # Every automation run must resolve one existing base branch before checkout.
+  - type: input
+    id: target_branch
     attributes:
-      label: Bug description
-      description: What is wrong?
+      label: Target branch
+      description: Existing branch that the generated pull request should target.
+      placeholder: main
     validations:
       required: true
   - type: textarea
-    id: expected
+    id: summary
+    attributes:
+      label: Problem summary
+      description: Briefly explain what is broken and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current behavior
+      description: Describe what happens now, including the relevant error or incorrect result.
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
     attributes:
       label: Expected behavior
-      description: What should happen instead?
-    validations:
-      required: true
-  - type: textarea
-    id: actual
-    attributes:
-      label: Actual behavior
-      description: What currently happens?
+      description: Describe what should happen after the fix.
     validations:
       required: true
   - type: textarea
@@ -42,37 +52,34 @@ body:
         3. ...
     validations:
       required: true
-  - type: dropdown
-    id: repository
-    attributes:
-      label: Affected repository
-      options:
-        - Frontend
-        - Backend
-        - Infrastructure
-        - Multiple repositories
-        - Unknown
-    validations:
-      required: true
-  - type: textarea
-    id: environment
-    attributes:
-      label: Environment
-      description: Browser, device, API environment, commit, deployment, or infrastructure environment.
-    validations:
-      required: true
   - type: textarea
     id: evidence
     attributes:
-      label: Logs, screenshots, and evidence
-      description: Add sanitized logs, screenshots, request/response samples, or other useful evidence.
+      label: Supporting evidence
+      description: Add sanitized logs, screenshots, failing tests, or request/response examples when available.
   - type: textarea
     id: acceptance
     attributes:
       label: Acceptance criteria
-      description: How will we know the bug is fixed?
+      description: List observable outcomes that prove the bug is fixed.
+      placeholder: |
+        - The reported behavior no longer occurs.
+        - Existing behavior remains compatible.
+        - Relevant repository checks pass.
     validations:
       required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation and evidence
+      description: Specify the checks and evidence the generated pull request must provide.
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Constraints and out of scope
+      description: State what must not change and anything intentionally excluded from this fix.
   - type: checkboxes
     id: safety
     attributes:

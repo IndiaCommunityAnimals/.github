@@ -1,0 +1,46 @@
+# Shared non-automation form. It deliberately has no codex-fix-requested label
+# or target branch, so repository caller workflows ignore issues from this form.
+name: General issue or discussion
+description: Ask a question or record a discussion without creating a Codex pull request
+title: "[Discussion]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for questions, investigation, planning, or discussion that
+        should not change repository files or create a pull request. Do not
+        include secrets, tokens, personal data, or production credentials.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Question or discussion topic
+      description: Clearly state what you want maintainers to consider or answer.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Provide relevant background, observations, alternatives, or constraints.
+    validations:
+      required: true
+  - type: input
+    id: related_area
+    attributes:
+      label: Related area or repository
+      description: Optional free-text context when the discussion spans a particular area.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the answer, decision, or follow-up you are seeking.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, credentials, tokens, and sensitive personal data from this issue.
+          required: true

@@ -19,6 +19,13 @@ assert.equal(extractTargetBranch('### Target branch\n\n../../main'), null);
 assert.equal(extractTargetBranch('### Target branch\n\nmain;curl'), null);
 assert.equal(extractTargetBranch('No branch supplied'), null);
 
+// Bug, feature, and technical-task forms all render the same required branch
+// heading, so every supported form enters the same safe checkout path.
+for (const section of ['Bug description', 'Problem statement', 'Required work']) {
+  const renderedForm = `### Target branch\n\nmain\n\n### ${section}\n\nDetailed request`;
+  assert.equal(extractTargetBranch(renderedForm), 'main');
+}
+
 assert.equal(isTrustedAssociation('OWNER'), true);
 assert.equal(isTrustedAssociation('MEMBER'), true);
 assert.equal(isTrustedAssociation('COLLABORATOR'), true);
