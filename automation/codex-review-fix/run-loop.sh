@@ -462,8 +462,15 @@ $CURRENT_FINDINGS_TEXT"
   # Large in-file removals are still allowed but flagged loudly. Whole-file
   # deletion is already blocked above, so this only catches large deletions
   # WITHIN a file that survives.
+  # The ratio clause needs its own floor: with ADD=0, DELETION_RATIO*ADD is 0,
+  # so "DEL > 0" would flag a single-line pure deletion as "large" — more
+  # sensitive at small ADD, backwards from what a large-deletion signal
+  # should do. Require at least 10 deleted lines before the ratio can fire at
+  # all, so a trivial one- or two-line cleanup with nothing added back never
+  # trips it; DELETION_LINE_THRESHOLD alone still catches genuinely large
+  # deletions on its own.
   read -r ADD DEL < <(git diff --cached --numstat | awk '{a+=$1; d+=$2} END{print a+0, d+0}')
-  if [ "$DEL" -gt "$DELETION_LINE_THRESHOLD" ] || { [ "$DEL" -gt 0 ] && [ "$DEL" -gt $((DELETION_RATIO * ADD)) ]; }; then
+  if [ "$DEL" -gt "$DELETION_LINE_THRESHOLD" ] || { [ "$DEL" -ge 10 ] && [ "$DEL" -gt $((DELETION_RATIO * ADD)) ]; }; then
     HAS_DELETIONS=1
   fi
 
