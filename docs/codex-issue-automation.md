@@ -7,7 +7,7 @@
 The supported flow is:
 
 ```text
-Bug/Feature/Technical Task form → verify → Codex fix → profile validation → normal PR → stop
+Bug/Feature/Technical Task form → verify → repo setup → Codex fix + validation → secret gate → normal PR → stop
 ```
 
 The workflow never merges, deploys, applies Terraform, changes cloud resources,
@@ -21,8 +21,7 @@ The organization `.github` repository owns shared policy and implementation:
 .github/.github/ISSUE_TEMPLATE/          inherited issue forms
 .github/.github/workflows/               reusable workflow
 automation/codex-issue-fix/              controller and verifier
-automation/codex-issue-fix/prompts/      independent stack prompts
-automation/codex-issue-fix/tests/        verifier regression tests
+automation/codex-issue-fix/prompts/      common trusted prompt
 ```
 
 The infrastructure, frontend, and backend repositories each own one small
@@ -42,8 +41,9 @@ Organization repositories inherit these forms when they do not define a local
 | **Technical task** | Yes | Target branch, context, required change, acceptance criteria, and validation |
 | **General issue or discussion** | No | Question/topic, context, and desired discussion outcome |
 
-The three implementation forms contain a required **Target branch** field. That
-field starts the caller workflow even when the repository has not provisioned
+The three implementation forms contain a required **Target branch** field,
+which must name the repository default branch. That field starts the caller
+workflow even when the repository has not provisioned
 the template's labels yet. The shared workflow creates any missing category,
 `codex-fix-requested`, and `codex-fix-approved` labels in the caller repository,
 then applies the request and category labels to the issue.
@@ -57,48 +57,62 @@ create a code change.
 
 ### Why there is no repository dropdown
 
-The repository is determined by where the issue is created. The repository's
-caller workflow supplies its own `infrastructure`, `frontend`, or `backend`
-profile to the reusable workflow. Asking the issue author to select a fixed
-repository category would duplicate information and could conflict with the
-actual caller.
+The repository is determined by where the issue is created. The reusable
+workflow has no infrastructure, frontend, or backend profile input. Asking the
+issue author to select a fixed category would duplicate repository identity.
 
 An implementation issue therefore describes one change in its current
 repository. Cross-repository work must be split into linked repository-local
 issues so each caller creates one independently reviewable PR.
 
-## Independent prompts
+## Trusted prompt
 
 The workflow concatenates trusted instructions in this order:
 
 1. Organization `AGENTS.md`.
 2. `prompts/base.md` for shared security and evidence rules.
-3. Exactly one profile prompt:
-   - `prompts/infrastructure.md`
-   - `prompts/frontend.md`
-   - `prompts/backend.md`
-4. The issue title and body inside `<github_issue>` delimiters as untrusted data.
+3. The issue title and body inside `<github_issue>` delimiters as untrusted data.
 
-Editing one profile does not change instructions for the other profiles.
+Technology, architecture, dependency, and validation guidance is read from the
+target repository instead of being duplicated centrally.
 
-## Profiles and validation
+## Target-repository validation skill
 
-| Profile | Central workflow behavior | Codex behavior |
-|---|---|---|
-| `infrastructure` | Installs Terraform/TFLint, restricts changes to `infra/*` and `README.md`, then runs fmt, backend-free validate, and TFLint | Follows the infrastructure prompt and existing Terraform policy |
-| `frontend` | Installs no application runtime and runs only the stack-neutral `git diff --check` gate | Discovers the repository's architecture, tools, paths, and checks |
-| `backend` | Installs no application runtime and runs only the stack-neutral `git diff --check` gate | Discovers the repository's architecture, tools, paths, and checks |
+Every caller repository owns its exact implementation-time checks in:
 
-The central workflow does not install or select a frontend/backend language,
-runtime, framework, dependency manager, source directory, or test command.
-Codex must inspect the checked-out repository and follow its existing policy,
-manifests, CI, architecture, and validation conventions.
+```text
+.agents/skills/repository-validation/SKILL.md
+.agents/skills/repository-validation/scripts/setup.sh    # optional
+.agents/skills/repository-validation/scripts/cleanup.sh  # optional
+```
 
-The controller rejects `.github`, agent policy, real environment files,
-Terraform state, real tfvars, and credentials before validation or Git
-operations. Infrastructure retains its known `infra/*` and `README.md` path
-boundary. Frontend and backend may change any path not rejected by the global
-protection list because their layouts are repository-discovered.
+The optional executable setup script may install locked dependencies, download
+pinned tooling, or start an isolated supporting service. It runs in the
+disposable export before Codex or GitHub credentials are restored. It must not
+perform validation or modify tracked/non-ignored files. Cleanup runs after the
+agent attempt even when validation fails.
+
+Codex discovers this tracked repository skill from the isolated worktree. The
+trusted base prompt explicitly invokes `$repository-validation`, so Codex runs
+the repository's checks, repairs implementation-caused failures, and reruns the
+checks before ending its single turn. If an environment limitation or existing
+repository problem prevents a pass, Codex must report the exact command, error,
+and reason in its structured result; that result is rendered in the pull request.
+The common controller protects `.agents/*`, preventing an implementation from
+editing or weakening its own validation instructions. Automation stops before
+Codex execution when the required skill file is missing.
+
+## Common and repository-specific responsibilities
+
+The common workflow contains no repository dependency setup, path allowlist,
+test, lint, build, audit, Terraform validation, or validation-reporting command.
+Those instructions live in the target repository's skill so each repository
+owns its implementation and validation contract.
+
+The common controller rejects `.agents`, `.github`, agent policy, real
+environment files, and credentials before Git operations. Repository-specific
+path and generated-file restrictions are instructions owned by the protected
+repository skill and repository `AGENTS.md`.
 
 ### Application discovery contract
 
@@ -115,11 +129,14 @@ The central automation deliberately does not assume React, React Native, Vite,
 Node versions, Python versions, Flask, directory names, package managers, test
 frameworks, database URLs, or fixed validation commands.
 
-This flexibility has a tradeoff: the independent central application gate
-checks patch integrity with `git diff --check`, but it cannot guarantee that
-repository-specific tests were selected correctly. Codex must report the checks
-it actually ran in its implementation summary, and a human reviewer must verify
-that evidence before merging.
+Codex must report the checks it actually ran in its implementation summary. The
+workflow includes that summary in the normal pull request. This is agent-reported
+evidence rather than an independent controller gate; repository CI and human
+review remain authoritative and must prevent merge when required checks fail.
+
+The common job is pinned to `ubuntu-24.04`. Repository-owned setup installs and
+checksum-verifies the exact stack tooling it requires; the infrastructure skill
+owns pinned Terraform and TFLint instead of relying on runner-image contents.
 
 ## Trigger and approval
 
@@ -152,16 +169,22 @@ Only `CODEX_AUTH_JSON` is passed explicitly. The caller does not use
 `secrets: inherit`, so unrelated organization or repository secrets are not
 made available to the reusable workflow.
 
+The target checkout disables persisted Git credentials. Codex authentication
+is restored only after repository setup, then removed before publication. The
+GitHub token exists only in later publish/API steps and is never available to
+the Codex process.
+
 ## Merge and rollout order
 
-1. Merge and validate the organization `.github` repository first.
-2. Confirm organization-default issue forms appear in a repository without a
+1. Add and validate the repository-owned validation skill first.
+2. Merge and validate the organization `.github` repository.
+3. Confirm organization-default issue forms appear in a repository without a
    local `.github/ISSUE_TEMPLATE` directory.
-3. Configure the organization secret access and repository workflow permissions.
-4. Merge the infrastructure caller and test a small repository-local issue
+4. Configure the organization secret access and repository workflow permissions.
+5. Merge the infrastructure caller and test a small repository-local issue
    using one of the three organization forms.
-5. After the infrastructure pilot succeeds, add callers to frontend and backend.
-6. Tag a reviewed central release and update callers from `@main` to that tag or
+6. After the infrastructure pilot succeeds, add callers to frontend and backend.
+7. Tag a reviewed central release and update callers from `@main` to that tag or
    an immutable commit SHA.
 
 The initial `@main` reference supports the pilot. A release tag or SHA prevents
@@ -173,18 +196,24 @@ an unreviewed central change from immediately affecting all callers.
 - External issue without approval: no checkout, Codex run, branch, or PR.
 - Agent makes no change: result comment; no PR.
 - Protected path changed: patch rejected; no PR.
-- Infrastructure validation or the central patch-integrity gate fails: patch
-  rejected; no PR.
+- Validation skill missing: no Codex run, branch, or PR.
+- Skill validation fails because of the implementation: Codex fixes the change
+  and reruns the skill checks within its turn.
+- Validation cannot pass because of an environment or pre-existing problem:
+  Codex reports the exact command and reason; the normal PR exposes that
+  evidence for repository CI and human review.
+- Secret scan finding in candidate code or the agent report: no branch or PR.
 - PR creation forbidden by settings: branch may exist, job reports the GitHub API failure.
-- Success: one commit on `codex/issue-N`, one normal PR, one result comment.
+- Agent produces an accepted patch: one commit on `codex/issue-N`, one normal
+  PR containing the agent's validation report, and one result comment.
 
 ## Local checks
 
 Run these before publishing shared changes:
 
 ```bash
-node automation/codex-issue-fix/tests/verify-issue.test.js
 bash -n automation/codex-issue-fix/run-agent.sh
+jq empty automation/codex-issue-fix/agent-output.schema.json
 ```
 
 Also validate all issue forms and workflow YAML with a YAML parser or
