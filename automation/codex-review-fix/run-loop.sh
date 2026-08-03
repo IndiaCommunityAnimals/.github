@@ -205,7 +205,12 @@ codex_call() {
 }
 
 for ROUND in $(seq 1 "$MAX"); do
-  git diff --unified=3 "$BASE_SHA" HEAD > "$WORK/pr.diff"
+  # Three-dot, not two-dot: $BASE_SHA is the base branch's tip as of THIS
+  # event, which can be newer than the PR's actual fork point on a long-lived
+  # PR. A plain two-dot diff would then show anything added to the base
+  # branch in the meantime as if this PR deleted it. Three-dot diffs against
+  # the merge-base, so only what the PR branch itself actually changed shows up.
+  git diff --unified=3 "$BASE_SHA"...HEAD > "$WORK/pr.diff"
 
   # ---- REVIEW (resumes the SAME reviewer thread across every round) ----
   if [ -z "$REVIEWER_THREAD" ]; then
@@ -487,7 +492,8 @@ done
 # fires on a clean-break or gate-blocked exit, since those already ended on a
 # review or committed nothing.
 if [ "$FIX_COUNT" -gt 0 ] && [ "$STOP_REASON" = "reached max rounds ($MAX)" ]; then
-  git diff --unified=3 "$BASE_SHA" HEAD > "$WORK/pr.diff"
+  # Three-dot for the same reason as the per-round review diff above.
+  git diff --unified=3 "$BASE_SHA"...HEAD > "$WORK/pr.diff"
   FINAL_REVIEW_PROMPT="This is the final cumulative diff after the round cap
 was reached. Review it once more against the same standards as before. End
 with EXACTLY one line: 'VERDICT: needs-changes' or 'VERDICT: looks-good'.
