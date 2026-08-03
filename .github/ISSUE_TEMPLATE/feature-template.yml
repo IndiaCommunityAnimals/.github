@@ -16,7 +16,7 @@ body:
     id: target_branch
     attributes:
       label: Target branch
-      description: Existing branch that the generated pull request should target.
+      description: Repository default branch that the generated pull request should target.
       placeholder: main
     validations:
       required: true

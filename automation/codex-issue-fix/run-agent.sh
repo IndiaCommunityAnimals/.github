@@ -1,228 +1,234 @@
 #!/usr/bin/env bash
-# Shared controller: isolate Codex, enforce profile-specific paths and checks,
-# then apply one validated patch to the authenticated caller-repository checkout.
+# Shared controller for preparing an isolated repository and producing a
+# reviewed, secret-scanned patch. Publishing is intentionally owned by a later
+# workflow step that never exposes GitHub credentials to Codex.
 set -euo pipefail
 
-ISSUE_NUMBER="${ISSUE_NUMBER:?}"
-TARGET_BRANCH="${TARGET_BRANCH:?}"
-FIX_BRANCH="${FIX_BRANCH:?}"
-PROFILE="${PROFILE:?}"
+MODE="${1:-}"
 REPOSITORY_ROOT="${REPOSITORY_ROOT:?}"
-CODEX_AUTH_FILE="${CODEX_AUTH_FILE:?}"
 
 SCRATCH="${RUNNER_TEMP:?}/codex-issue-fix"
 ISSUE_FILE="${SCRATCH}/issue.md"
 PROMPT_FILE="${SCRATCH}/trusted-prompt.md"
-AGENT_SUMMARY="${SCRATCH}/agent-summary.md"
+AGENT_RESULT="${SCRATCH}/agent-result.json"
+OUTPUT_SCHEMA="${SCRATCH}/agent-output.schema.json"
 AGENT_WORK="${SCRATCH}/agent-work"
+BASELINE_FILE="${SCRATCH}/baseline.sha"
 PATCH_FILE="${SCRATCH}/agent.patch"
-GATE_LOG="${SCRATCH}/validation.log"
+VALIDATION_SKILL="${AGENT_WORK}/.agents/skills/repository-validation/SKILL.md"
 
-# These flags keep runner/user configuration from silently changing CI behavior
-# and ensure the model edits only the disposable exported repository.
-CODEX=(
-  codex exec
-  --sandbox workspace-write
-  --ephemeral
-  --ignore-user-config
-  --ignore-rules
-  --skip-git-repo-check
-)
-
-# Validation does not need model credentials. Truncate the exact trusted path
-# after Codex returns and again on unexpected controller exit as a safety net.
-clear_codex_auth() {
-  if [ -f "$CODEX_AUTH_FILE" ]; then
-    : > "$CODEX_AUTH_FILE"
-    chmod 600 "$CODEX_AUTH_FILE"
-  fi
-}
-trap clear_codex_auth EXIT
-
-# Expected no-change outcomes use step outputs so the workflow can leave a clear
-# issue comment instead of failing with an opaque shell error.
 write_outputs() {
-  local did_fix="$1"
-  local stop_reason="$2"
+  local ready="$1"
+  local reason="$2"
   {
-    echo "did_fix=$did_fix"
-    echo "stop_reason=$stop_reason"
+    echo "${3}=${ready}"
+    echo "stop_reason<<CODEX_STOP_REASON"
+    echo "$reason"
+    echo "CODEX_STOP_REASON"
   } >> "$GITHUB_OUTPUT"
 }
 
-# Reject control files, secrets, local environment files, and Terraform inputs
-# before applying the profile-specific allowlist.
-is_protected_path() {
+is_common_protected_path() {
   local changed_file="$1"
   case "$changed_file" in
-    .github/* | AGENTS.md | .gitignore | \
-      *.tfstate | *.tfstate.* | *.tfplan | */.terraform/*)
+    .agents | .agents/* | .codex | .codex/* | .github | .github/* | AGENTS.md | .gitignore)
       return 0
       ;;
     .env | .env.* | */.env | */.env.*)
-      # Placeholder-only examples are reviewable configuration contracts; every
-      # real environment file and environment-specific variant stays protected.
       [[ "$changed_file" != .env.example && "$changed_file" != */.env.example ]]
       return
       ;;
-    *.tfvars)
-      # Shareable example inputs are allowed; real tfvars remain protected.
-      [[ "$changed_file" != *.tfvars.example ]]
+    *)
+      return 1
+      ;;
+  esac
+}
+
+prepare_repository() {
+  rm -rf -- "$AGENT_WORK"
+  mkdir -p "$AGENT_WORK"
+  git -C "$REPOSITORY_ROOT" archive HEAD | tar -x -C "$AGENT_WORK"
+  git -C "$AGENT_WORK" init -q
+  git -C "$AGENT_WORK" config user.name "codex-baseline"
+  git -C "$AGENT_WORK" config user.email "codex-baseline@localhost"
+  git -C "$AGENT_WORK" add --all
+  git -C "$AGENT_WORK" commit -q -m "Codex isolated baseline"
+  git -C "$AGENT_WORK" rev-parse HEAD > "$BASELINE_FILE"
+
+  if [ ! -f "$VALIDATION_SKILL" ]; then
+    write_outputs false \
+      "Target repository is missing .agents/skills/repository-validation/SKILL.md" \
+      prepared
+    return
+  fi
+
+  local setup_script="${AGENT_WORK}/.agents/skills/repository-validation/scripts/setup.sh"
+  if [ -e "$setup_script" ]; then
+    if [ ! -x "$setup_script" ]; then
+      write_outputs false "Repository validation setup.sh is not executable" prepared
       return
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+    fi
+    if ! "$setup_script" "$AGENT_WORK"; then
+      write_outputs false "Repository validation environment setup failed" prepared
+      return
+    fi
+  fi
+
+  if ! git -C "$AGENT_WORK" diff --quiet HEAD ||
+    ! git -C "$AGENT_WORK" diff --cached --quiet HEAD; then
+    write_outputs false "Repository validation setup modified tracked files" prepared
+    return
+  fi
+
+  local untracked
+  untracked="$(git -C "$AGENT_WORK" ls-files --others --exclude-standard)"
+  if [ -n "$untracked" ]; then
+    echo "::error::Validation setup created non-ignored files:"
+    printf '%s\n' "$untracked"
+    write_outputs false \
+      "Repository validation setup created non-ignored files" prepared
+    return
+  fi
+
+  write_outputs true "Repository validation environment is ready" prepared
 }
 
-# Infrastructure keeps its known module boundary. Application profiles may use
-# any repository path that is not rejected by the global protection list.
-is_allowed_path() {
-  local changed_file="$1"
-  case "$PROFILE" in
-    infrastructure)
-      case "$changed_file" in
-        infra/* | README.md) return 0 ;;
-      esac
-      ;;
-    frontend | backend)
-      return 0
-      ;;
-    *)
-      echo "::error::Unknown repository profile: $PROFILE"
-      return 1
-      ;;
-  esac
-  return 1
-}
+implement_issue() {
+  : "${CODEX_AUTH_FILE:?}"
+  local secret_scanner="${SECRET_SCANNER:?}"
+  local baseline
+  baseline="$(cat "$BASELINE_FILE")"
 
-# Validation runs outside the model process and is therefore an independent
-# gate. Logs are retained for diagnostics but a failed gate never reaches Git.
-validate_agent_work() {
-  local failed=0
-  : > "$GATE_LOG"
+  clear_codex_auth() {
+    if [ -f "$CODEX_AUTH_FILE" ]; then
+      : > "$CODEX_AUTH_FILE"
+      chmod 600 "$CODEX_AUTH_FILE"
+    fi
+  }
+  trap clear_codex_auth EXIT
 
-  case "$PROFILE" in
-    infrastructure)
-      echo "=== terraform fmt -check -recursive ===" >> "$GATE_LOG"
-      (
-        cd "$AGENT_WORK" &&
-          terraform fmt -check -recursive -no-color -diff
-      ) >> "$GATE_LOG" 2>&1 || failed=1
-
-      echo "=== terraform validate: infra/environments/preprod ===" >> "$GATE_LOG"
-      (
-        cd "$AGENT_WORK/infra/environments/preprod" &&
-          terraform init -backend=false -input=false -no-color &&
-          terraform validate -no-color
-      ) >> "$GATE_LOG" 2>&1 || failed=1
-
-      if command -v tflint >/dev/null 2>&1; then
-        echo "=== tflint --recursive ===" >> "$GATE_LOG"
-        (
-          cd "$AGENT_WORK" &&
-            tflint --recursive --no-color
-        ) >> "$GATE_LOG" 2>&1 || failed=1
-      fi
-      ;;
-    frontend | backend)
-      echo "=== git diff --check ===" >> "$GATE_LOG"
-      git -C "$AGENT_WORK" diff --check HEAD >> "$GATE_LOG" 2>&1 || failed=1
-      ;;
-    *)
-      echo "Unknown repository profile: $PROFILE" >> "$GATE_LOG"
-      failed=1
-      ;;
-  esac
-
-  return "$failed"
-}
-
-# Export tracked files without the caller checkout's Git credential, then create
-# a disposable baseline commit so every model change is measurable.
-rm -rf "$AGENT_WORK"
-mkdir -p "$AGENT_WORK"
-git -C "$REPOSITORY_ROOT" archive HEAD | tar -x -C "$AGENT_WORK"
-git -C "$AGENT_WORK" init -q
-git -C "$AGENT_WORK" config user.name "baseline"
-git -C "$AGENT_WORK" config user.email "baseline@localhost"
-git -C "$AGENT_WORK" add --all
-git -C "$AGENT_WORK" commit -q -m "Agent work baseline"
-
-# The issue is clearly delimited as untrusted data after all trusted policy and
-# profile instructions have been assembled by the workflow.
-PROMPT="$(cat "$PROMPT_FILE")
+  local prompt
+  prompt="$(cat "$PROMPT_FILE")
 
 <github_issue>
 $(cat "$ISSUE_FILE")
 </github_issue>"
 
-CODEX_EXIT=0
-(
-  cd "$AGENT_WORK" &&
-    "${CODEX[@]}" --output-last-message "$AGENT_SUMMARY" "$PROMPT"
-) 2>"${SCRATCH}/codex.log" || CODEX_EXIT=$?
+  : > "$AGENT_RESULT"
+  local codex_exit=0
+  (
+    cd "$AGENT_WORK"
+    env -u GH_TOKEN -u GITHUB_TOKEN codex exec \
+      --sandbox workspace-write \
+      --config 'approval_policy="never"' \
+      --ignore-user-config \
+      --ignore-rules \
+      --skip-git-repo-check \
+      --ephemeral \
+      --output-schema "$OUTPUT_SCHEMA" \
+      --output-last-message "$AGENT_RESULT" \
+      "$prompt"
+  ) > "${SCRATCH}/codex.log" 2>&1 || codex_exit=$?
 
-# Remove usable Codex credentials before validation or Git commands inspect the
-# agent-generated patch.
-clear_codex_auth
+  clear_codex_auth
 
-if [ "$CODEX_EXIT" -ne 0 ]; then
-  write_outputs false "Codex agent execution failed"
-  exit 0
-fi
-
-if [ ! -s "$AGENT_SUMMARY" ]; then
-  write_outputs false "Codex agent returned no implementation summary"
-  exit 0
-fi
-
-# Include untracked files in the diff, then enforce both the global protection
-# list and the selected repository profile's allowlist.
-git -C "$AGENT_WORK" add -N --all
-CHANGED_FILES=()
-while IFS= read -r changed_file; do
-  CHANGED_FILES+=("$changed_file")
-done < <(git -C "$AGENT_WORK" diff --name-only --diff-filter=ACDMRTUXB HEAD)
-
-if [ "${#CHANGED_FILES[@]}" -eq 0 ]; then
-  write_outputs false "Issue could not be implemented safely; the agent made no changes"
-  exit 0
-fi
-
-for changed_file in "${CHANGED_FILES[@]}"; do
-  if is_protected_path "$changed_file" || ! is_allowed_path "$changed_file"; then
-    echo "::error::Agent attempted to change protected path: $changed_file"
-    write_outputs false "Rejected because the agent changed a protected path"
-    exit 0
+  if [ "$codex_exit" -ne 0 ]; then
+    write_outputs false "Codex agent execution failed" patch_ready
+    return
   fi
-done
+  if ! jq -e '
+    (.approach | type == "string") and
+    (.files_changed | type == "array") and
+    (.validation.status | IN("passed", "failed", "blocked")) and
+    (.validation.commands | type == "array" and length > 0) and
+    (.validation.failure_reason | type == "string") and
+    (.validation.status == "passed" or (.validation.failure_reason | length > 0)) and
+    (.risks | type == "array") and
+    (.documentation | type == "string")
+  ' "$AGENT_RESULT" >/dev/null; then
+    write_outputs false "Codex returned an invalid structured result" patch_ready
+    return
+  fi
 
-if ! validate_agent_work; then
-  echo "::group::Repository validation failures"
-  cat "$GATE_LOG"
-  echo "::endgroup::"
-  write_outputs false "Generated change failed repository validation gates"
-  exit 0
-fi
+  git -C "$AGENT_WORK" add -N --all
+  local changed_files=()
+  while IFS= read -r -d '' changed_file; do
+    changed_files+=("$changed_file")
+  done < <(git -C "$AGENT_WORK" diff --name-only -z \
+    --diff-filter=ACDMRTUXB "$baseline")
 
-# Apply only the accepted binary-safe patch to the authenticated checkout, then
-# create exactly one automation-owned commit and push with lease protection.
-git -C "$AGENT_WORK" diff --binary HEAD > "$PATCH_FILE"
-if [ ! -s "$PATCH_FILE" ]; then
-  write_outputs false "Agent changes produced an empty patch"
-  exit 0
-fi
+  if [ "${#changed_files[@]}" -eq 0 ]; then
+    write_outputs false "Issue could not be implemented safely; Codex made no changes" \
+      patch_ready
+    return
+  fi
+  for changed_file in "${changed_files[@]}"; do
+    if is_common_protected_path "$changed_file"; then
+      echo "::error::Codex attempted to change protected path: $changed_file"
+      write_outputs false "Rejected because Codex changed a protected path" patch_ready
+      return
+    fi
+  done
 
-git -C "$REPOSITORY_ROOT" config user.name "github-actions[bot]"
-git -C "$REPOSITORY_ROOT" config user.email \
-  "41898282+github-actions[bot]@users.noreply.github.com"
-git -C "$REPOSITORY_ROOT" checkout -B "$FIX_BRANCH" "origin/$TARGET_BRANCH"
-git -C "$REPOSITORY_ROOT" apply --index "$PATCH_FILE"
-git -C "$REPOSITORY_ROOT" commit -m "fix: address issue #${ISSUE_NUMBER}"
-git -C "$REPOSITORY_ROOT" fetch origin \
-  "$FIX_BRANCH:refs/remotes/origin/$FIX_BRANCH" 2>/dev/null || true
-git -C "$REPOSITORY_ROOT" push --force-with-lease origin "$FIX_BRANCH"
+  git -C "$AGENT_WORK" add --all
+  git -C "$AGENT_WORK" commit -q -m "Codex candidate change"
+  local candidate
+  candidate="$(git -C "$AGENT_WORK" rev-parse HEAD)"
 
-write_outputs true "Validated changes were pushed for human review"
+  local scan_exit=0
+  "$secret_scanner" git --redact --no-banner --no-color \
+    --log-opts="${baseline}..${candidate}" "$AGENT_WORK" || scan_exit=$?
+  if [ "$scan_exit" -ne 0 ]; then
+    if [ "$scan_exit" -eq 1 ]; then
+      write_outputs false \
+        "Secret scanning found a credential or sensitive value; no branch was published" \
+        patch_ready
+    else
+      write_outputs false \
+        "Secret scanning could not complete safely; no branch was published" \
+        patch_ready
+    fi
+    return
+  fi
+
+  local result_scan_dir="${SCRATCH}/result-scan"
+  rm -rf -- "$result_scan_dir"
+  mkdir -p "$result_scan_dir"
+  cp "$AGENT_RESULT" "${result_scan_dir}/agent-result.json"
+  scan_exit=0
+  "$secret_scanner" dir --redact --no-banner --no-color "$result_scan_dir" ||
+    scan_exit=$?
+  if [ "$scan_exit" -ne 0 ]; then
+    if [ "$scan_exit" -eq 1 ]; then
+      write_outputs false \
+        "Secret scanning found a sensitive value in the Codex report; no branch was published" \
+        patch_ready
+    else
+      write_outputs false \
+        "Codex report secret scanning could not complete safely; no branch was published" \
+        patch_ready
+    fi
+    return
+  fi
+
+  git -C "$AGENT_WORK" diff --binary "$baseline" "$candidate" > "$PATCH_FILE"
+  if [ ! -s "$PATCH_FILE" ]; then
+    write_outputs false "Codex changes produced an empty patch" patch_ready
+    return
+  fi
+
+  write_outputs true "Candidate changes passed the common safety gates" patch_ready
+}
+
+case "$MODE" in
+  prepare)
+    prepare_repository
+    ;;
+  implement)
+    implement_issue
+    ;;
+  *)
+    echo "Usage: $0 prepare|implement" >&2
+    exit 2
+    ;;
+esac
