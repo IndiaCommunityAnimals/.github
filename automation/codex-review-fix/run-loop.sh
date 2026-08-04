@@ -392,16 +392,29 @@ $CURRENT_FINDINGS_TEXT"
   git reset -q --mixed "$ROUND_START"
 
   # ---- GATE A: scope allowlist (revert everything outside the profile's scope) ----
-  # Snapshot in-scope changed paths before reverting anything — used below to
-  # confirm this gate never ALSO discards an in-scope change. The revert loop
-  # only ever acts on a path that fails in_scope, so that should already be
-  # structurally guaranteed; the check exists to catch it loudly if it's ever
-  # not (e.g. a bug in in_scope() or in the porcelain-line parsing below)
-  # rather than silently losing a real, in-scope fix with zero trace.
-  IN_SCOPE_BEFORE=""
+  # Back up in-scope changed files' actual content before reverting anything
+  # — not just their paths — so that if one unexpectedly disappears below,
+  # it can be actively restored, not just reported. The revert loop only
+  # ever acts on a path that fails in_scope, so in-scope files should
+  # already be structurally untouchable here; this backup is what makes that
+  # a guarantee rather than an assumption, covering the case where in_scope()
+  # or the porcelain-line parsing itself has a bug.
+  GATE_A_BACKUP="$WORK/gate-a-backup-$ROUND"
+  rm -rf "$GATE_A_BACKUP"; mkdir -p "$GATE_A_BACKUP"
+  # A file, not a space-accumulated variable: this list gets re-read below
+  # via `while read`, and a `for f in $VAR` re-split of an accumulated
+  # string is not reliable across every shell this might run under.
+  IN_SCOPE_LIST="$WORK/gate-a-inscope-$ROUND.txt"
+  : > "$IN_SCOPE_LIST"
   while IFS= read -r line; do
     f="${line:3}"; [ -z "$f" ] && continue
-    in_scope "$f" && IN_SCOPE_BEFORE="$IN_SCOPE_BEFORE $f"
+    if in_scope "$f"; then
+      echo "$f" >> "$IN_SCOPE_LIST"
+      if [ -f "$f" ]; then
+        mkdir -p "$GATE_A_BACKUP/$(dirname "$f")"
+        cp -p "$f" "$GATE_A_BACKUP/$f" 2>/dev/null || true
+      fi
+    fi
   done < <(git status --porcelain)
 
   REVERTED_OOS=""
@@ -425,14 +438,25 @@ $CURRENT_FINDINGS_TEXT"
     } >> "$CLEANUP_NOTES"
   fi
 
-  # Belt-and-suspenders: every path from the snapshot above must still show
-  # as changed now. If one doesn't, Gate A (or in_scope()) has a real bug —
-  # say so loudly rather than letting a legitimate fix vanish silently.
-  for f in $IN_SCOPE_BEFORE; do
+  # Actively restore, don't just detect: every path from the snapshot above
+  # must still show as changed now. If one doesn't, Gate A (or in_scope())
+  # has a real bug — put the backed-up content back rather than letting a
+  # legitimate, in-scope fix vanish, and still say so loudly since this
+  # should never happen in the first place.
+  RESTORED_BY_GATE_A=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
     if ! git status --porcelain -- "$f" | grep -q .; then
-      echo "::error::Gate A inconsistency: in-scope change to '$f' disappeared after the scope pass. This should never happen — treat as a bug in in_scope() or Gate A, not an expected revert."
+      if [ -f "$GATE_A_BACKUP/$f" ]; then
+        mkdir -p "$(dirname "$f")"
+        cp -p "$GATE_A_BACKUP/$f" "$f" 2>/dev/null && RESTORED_BY_GATE_A="$RESTORED_BY_GATE_A $f"
+      fi
     fi
-  done
+  done < "$IN_SCOPE_LIST"
+  if [ -n "$RESTORED_BY_GATE_A" ]; then
+    echo "::error::Gate A inconsistency: in-scope change(s) disappeared after the scope pass and were force-restored from backup — this should never happen; treat as a bug in in_scope() or Gate A:$RESTORED_BY_GATE_A"
+  fi
+  rm -rf "$GATE_A_BACKUP" "$IN_SCOPE_LIST"
 
   # ---- GATE A2: finding-scoped restriction (within the profile's scope) ----
   # Staying inside scope by PATH doesn't mean staying in scope: a real fix
