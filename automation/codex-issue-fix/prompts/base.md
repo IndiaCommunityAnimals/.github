@@ -28,6 +28,6 @@ Shared rules:
   information is missing.
 
 Return the final response in the provided JSON schema. Include the implementation
-approach, files changed, every validation command and actual result, failure or
-blocking reason when applicable, risks, and documentation status. Never claim a
-check passed unless you ran it.
+approach, every validation command and actual result, failure or blocking reason
+when applicable, risks, and documentation status. Never claim a check passed
+unless you ran it.

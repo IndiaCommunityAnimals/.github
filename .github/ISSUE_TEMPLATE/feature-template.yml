@@ -3,7 +3,6 @@
 name: Feature request
 description: Request a user or platform capability for Codex to implement in a pull request
 title: "[Feature]: "
-labels: ["feature", "codex-fix-requested"]
 body:
   - type: markdown
     attributes:
@@ -16,7 +15,7 @@ body:
     id: target_branch
     attributes:
       label: Target branch
-      description: Repository default branch that the generated pull request should target.
+      description: Existing repository branch that the generated pull request should target.
       placeholder: main
     validations:
       required: true
@@ -45,11 +44,6 @@ body:
         - Relevant repository checks pass.
     validations:
       required: true
-  - type: textarea
-    id: dependencies
-    attributes:
-      label: Dependencies and cross-repository impact
-      description: Identify API, UI, infrastructure, rollout, migration, or external-service dependencies.
   - type: textarea
     id: out_of_scope
     attributes:

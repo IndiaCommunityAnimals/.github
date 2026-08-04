@@ -42,11 +42,12 @@ Organization repositories inherit these forms when they do not define a local
 | **General issue or discussion** | No | Question/topic, context, and desired discussion outcome |
 
 The three implementation forms contain a required **Target branch** field,
-which must name the repository default branch. That field starts the caller
-workflow even when the repository has not provisioned
-the template's labels yet. The shared workflow creates any missing category,
-`codex-fix-requested`, and `codex-fix-approved` labels in the caller repository,
-then applies the request and category labels to the issue.
+which must name an existing branch in that repository. The selected branch is
+checked out as the implementation baseline and becomes the generated pull
+request's base. The field starts the caller workflow even when the repository
+does not have the automation labels yet. The shared workflow creates any missing
+category, `codex-fix-requested`, and `codex-fix-approved` labels in the caller
+repository, then applies the request and category labels to the issue.
 
 All forms require a safety confirmation that secrets, credentials, tokens, and
 sensitive personal data were removed. Supporting evidence, dependencies,
