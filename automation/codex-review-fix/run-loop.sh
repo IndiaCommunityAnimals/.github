@@ -42,7 +42,15 @@ BASE_SHA="${BASE_SHA:?}"
 SRC_BRANCH="${SRC_BRANCH:?}"           # the PR's own branch — fixes commit and push HERE, no separate branch
 PROFILE="${PROFILE:?}"                 # backend or frontend — selects scope/install/validate below
 REPOSITORY_ROOT="${REPOSITORY_ROOT:?}" # authenticated checkout of the PR's own branch
-CODEX=(codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check)
+# workspace-write, not the full bypass: confirmed live that it neither hangs
+# nor blocks in-place edits or `codex exec resume` (the negotiation loop's
+# one hard requirement) — the loop's own prompts never ask Codex to touch
+# anything outside the checkout or reach the network, so nothing it actually
+# does needs escalation beyond this sandbox. Existing gates below are
+# unaffected: sandboxing restricts WHERE Codex can act, not what it's
+# allowed to do within the workspace, so a sandboxed Codex can still make an
+# in-scope-by-path-but-wrong edit or try to stage/commit past a gate.
+CODEX=(codex exec --sandbox workspace-write --skip-git-repo-check)
 
 cd "$REPOSITORY_ROOT"
 
