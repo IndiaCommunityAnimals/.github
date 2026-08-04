@@ -184,6 +184,7 @@ jobs:
           DELETIONS: ${{ steps.loop.outputs.deletions_flagged }}
           HAS_CLEANUP: ${{ steps.loop.outputs.has_cleanup_notes }}
           HAS_NEGOTIATION: ${{ steps.loop.outputs.has_negotiation_notes }}
+          HAS_NOOP_SUMMARY: ${{ steps.loop.outputs.has_noop_summary }}
         run: |
           WORK="${RUNNER_TEMP}/codex-review-fix"
           MARKER="<!-- codex-loop -->"
@@ -226,6 +227,14 @@ jobs:
               echo "<sub>Fixes generated autonomously and committed directly to this branch; review before merging.</sub>"
             else
               echo "Reviewed — no auto-fix pushed. _(${STOP_REASON})_"
+              if [ "$HAS_NOOP_SUMMARY" = "true" ]; then
+                echo
+                echo "---"
+                echo "### 🤷 What Codex attempted (nothing applied)"
+                echo "The fixer's own final message for the round that produced no change — whether it made an out-of-scope attempt (see cleanup candidates below, if any) or simply didn't act. Included so this isn't a dead end with no trail once the run ends."
+                echo
+                cat "${WORK}/noop-fix-summary.md" 2>/dev/null || true
+              fi
             fi
             if [ "$HAS_NEGOTIATION" = "true" ]; then
               echo

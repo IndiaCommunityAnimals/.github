@@ -392,15 +392,47 @@ $CURRENT_FINDINGS_TEXT"
   git reset -q --mixed "$ROUND_START"
 
   # ---- GATE A: scope allowlist (revert everything outside the profile's scope) ----
+  # Snapshot in-scope changed paths before reverting anything — used below to
+  # confirm this gate never ALSO discards an in-scope change. The revert loop
+  # only ever acts on a path that fails in_scope, so that should already be
+  # structurally guaranteed; the check exists to catch it loudly if it's ever
+  # not (e.g. a bug in in_scope() or in the porcelain-line parsing below)
+  # rather than silently losing a real, in-scope fix with zero trace.
+  IN_SCOPE_BEFORE=""
+  while IFS= read -r line; do
+    f="${line:3}"; [ -z "$f" ] && continue
+    in_scope "$f" && IN_SCOPE_BEFORE="$IN_SCOPE_BEFORE $f"
+  done < <(git status --porcelain)
+
+  REVERTED_OOS=""
   while IFS= read -r line; do
     f="${line:3}"; [ -z "$f" ] && continue
     if in_scope "$f"; then continue; fi
     if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
-      git checkout -- "$f" 2>/dev/null || true     # tracked → revert (restores deletions too)
+      git checkout -- "$f" 2>/dev/null && REVERTED_OOS="$REVERTED_OOS $f"   # tracked → revert (restores deletions too)
     else
-      rm -rf -- "$f" 2>/dev/null || true           # untracked file/dir → remove
+      rm -rf -- "$f" 2>/dev/null && REVERTED_OOS="$REVERTED_OOS $f"         # untracked file/dir → remove
     fi
   done < <(git status --porcelain)
+  if [ -n "$REVERTED_OOS" ]; then
+    echo "::warning::Gate A reverted change(s) outside the profile's scope ($SCOPE_PREFIX):$REVERTED_OOS"
+    {
+      echo "### Round $ROUND — attempted changes outside the profile's scope ($SCOPE_PREFIX):$REVERTED_OOS"
+      echo "_Auto-reverted; only files under the profile's scope prefix may be modified. Codex's own summary for this round (may explain its reasoning — verify independently):_"
+      echo
+      cat "$WORK/fix-summary-$ROUND.md" 2>/dev/null || echo "_(no summary captured)_"
+      echo
+    } >> "$CLEANUP_NOTES"
+  fi
+
+  # Belt-and-suspenders: every path from the snapshot above must still show
+  # as changed now. If one doesn't, Gate A (or in_scope()) has a real bug —
+  # say so loudly rather than letting a legitimate fix vanish silently.
+  for f in $IN_SCOPE_BEFORE; do
+    if ! git status --porcelain -- "$f" | grep -q .; then
+      echo "::error::Gate A inconsistency: in-scope change to '$f' disappeared after the scope pass. This should never happen — treat as a bug in in_scope() or Gate A, not an expected revert."
+    fi
+  done
 
   # ---- GATE A2: finding-scoped restriction (within the profile's scope) ----
   # Staying inside scope by PATH doesn't mean staying in scope: a real fix
@@ -462,7 +494,15 @@ $CURRENT_FINDINGS_TEXT"
   fi
 
   if git diff --cached --quiet; then
-    STOP_REASON="review flagged issues but fix produced no in-scope change (round $ROUND)"; break
+    STOP_REASON="review flagged issues but fix produced no in-scope change (round $ROUND)"
+    # Nothing survived to become a commit, so there's no diff to show — but
+    # Codex's own final message for this round (what it attempted, or why it
+    # didn't act) is still real signal. Without this, "no in-scope change"
+    # was previously a dead end: no gate warning necessarily fired (the
+    # fixer may simply not have edited anything), and the round's actual
+    # output was never captured anywhere once the runner tore down.
+    cp "$WORK/fix-summary-$ROUND.md" "$WORK/noop-fix-summary.md" 2>/dev/null || true
+    break
   fi
 
   # Large in-file removals are still allowed but flagged loudly. Whole-file
@@ -553,6 +593,7 @@ fi
   echo "deletions_flagged=$([ "$HAS_DELETIONS" -gt 0 ] && echo true || echo false)"
   echo "has_cleanup_notes=$([ -s "$CLEANUP_NOTES" ] && echo true || echo false)"
   echo "has_negotiation_notes=$([ -s "$NEGOTIATION_NOTES" ] && echo true || echo false)"
+  echo "has_noop_summary=$([ -s "$WORK/noop-fix-summary.md" ] && echo true || echo false)"
 } >> "$GITHUB_OUTPUT"
 
 # Push straight to the PR's own branch — no -f. A plain push only succeeds as a
