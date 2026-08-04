@@ -4,17 +4,12 @@
   "additionalProperties": false,
   "required": [
     "approach",
-    "files_changed",
     "validation",
     "risks",
     "documentation"
   ],
   "properties": {
     "approach": { "type": "string", "minLength": 1 },
-    "files_changed": {
-      "type": "array",
-      "items": { "type": "string", "minLength": 1 }
-    },
     "validation": {
       "type": "object",
       "additionalProperties": false,

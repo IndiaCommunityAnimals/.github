@@ -11,6 +11,7 @@ SCRATCH="${RUNNER_TEMP:?}/codex-issue-fix"
 ISSUE_FILE="${SCRATCH}/issue.md"
 PROMPT_FILE="${SCRATCH}/trusted-prompt.md"
 AGENT_RESULT="${SCRATCH}/agent-result.json"
+SAFE_RESULT_MARKER="${SCRATCH}/agent-result.safe"
 OUTPUT_SCHEMA="${SCRATCH}/agent-output.schema.json"
 AGENT_WORK="${SCRATCH}/agent-work"
 BASELINE_FILE="${SCRATCH}/baseline.sha"
@@ -115,6 +116,7 @@ $(cat "$ISSUE_FILE")
 </github_issue>"
 
   : > "$AGENT_RESULT"
+  rm -f -- "$SAFE_RESULT_MARKER"
   local codex_exit=0
   (
     cd "$AGENT_WORK"
@@ -138,7 +140,6 @@ $(cat "$ISSUE_FILE")
   fi
   if ! jq -e '
     (.approach | type == "string") and
-    (.files_changed | type == "array") and
     (.validation.status | IN("passed", "failed", "blocked")) and
     (.validation.commands | type == "array" and length > 0) and
     (.validation.failure_reason | type == "string") and
@@ -210,6 +211,8 @@ $(cat "$ISSUE_FILE")
     fi
     return
   fi
+  : > "$SAFE_RESULT_MARKER"
+  chmod 600 "$SAFE_RESULT_MARKER"
 
   git -C "$AGENT_WORK" diff --binary "$baseline" "$candidate" > "$PATCH_FILE"
   if [ ! -s "$PATCH_FILE" ]; then

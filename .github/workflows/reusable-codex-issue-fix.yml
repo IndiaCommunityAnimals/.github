@@ -54,8 +54,8 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      # Issue Forms only apply labels that already exist. Provision them inside
-      # the caller repository so missing setup never prevents an implementation run.
+      # Keep label provisioning and application in the workflow so inherited
+      # issue forms do not depend on pre-existing repository labels.
       - name: Ensure automation labels
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
@@ -155,11 +155,6 @@ jobs:
 
             if (!targetBranch) {
               problems.push('Add a `### Target branch` section containing one branch name.');
-            } else if (targetBranch !== context.payload.repository.default_branch) {
-              problems.push(
-                `Target branch must be the default branch ` +
-                `\`${context.payload.repository.default_branch}\`.`
-              );
             } else {
               try {
                 await github.rest.repos.getBranch({
@@ -501,6 +496,7 @@ jobs:
           PR_URL: ${{ steps.pull-request.outputs.url }}
           TARGET_BRANCH: ${{ steps.verify.outputs.target_branch }}
           RESULT_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.json
+          RESULT_SAFE_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.safe
         with:
           script: |
             const fs = require('fs');
@@ -515,11 +511,25 @@ jobs:
               : process.env.FIX_REASON || process.env.PREPARE_REASON ||
                 'The workflow failed before it could produce a change.';
             let details = '';
-            if (fs.existsSync(process.env.RESULT_PATH)) {
-              const result = JSON.parse(fs.readFileSync(process.env.RESULT_PATH, 'utf8'));
-              details = `\n\nValidation status: **${result.validation.status}**`;
-              if (result.validation.status !== 'passed') {
-                details += `\n\nReason: ${result.validation.failure_reason}`;
+            if (fs.existsSync(process.env.RESULT_SAFE_PATH) &&
+                fs.existsSync(process.env.RESULT_PATH)) {
+              try {
+                const rawResult = fs.readFileSync(process.env.RESULT_PATH, 'utf8').trim();
+                if (rawResult) {
+                  const result = JSON.parse(rawResult);
+                  const validation = result?.validation;
+                  if (validation && ['passed', 'failed', 'blocked'].includes(validation.status)) {
+                    details = `\n\nValidation status: **${validation.status}**`;
+                    if (validation.status !== 'passed') {
+                      details += `\n\nReason: ${validation.failure_reason ||
+                        'The repository validation did not pass.'}`;
+                    }
+                  } else {
+                    core.warning('Codex result did not contain a usable validation status.');
+                  }
+                }
+              } catch {
+                core.warning('Could not parse the secret-scanned Codex result.');
               }
             }
             const body = `${marker}
