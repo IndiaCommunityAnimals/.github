@@ -131,6 +131,26 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
 
+      # GitHub-hosted Ubuntu can restrict the user namespaces Bubblewrap needs
+      # for Codex's --sandbox workspace-write mode to actually set up (without
+      # this, the CLI fails before touching any file — e.g. "bwrap: loopback:
+      # Failed RTM_NEWADDR" — confirmed hitting this live before adding this
+      # step). Record and restore both values so the privilege change is
+      # narrowly scoped to this job.
+      - name: Prepare Codex Linux sandbox
+        id: sandbox-host
+        run: |
+          if sysctl kernel.unprivileged_userns_clone >/dev/null 2>&1; then
+            echo "original_userns_clone=$(sysctl -n kernel.unprivileged_userns_clone)" \
+              >> "$GITHUB_OUTPUT"
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            echo "original_apparmor_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" \
+              >> "$GITHUB_OUTPUT"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       # CODEX_AUTH_JSON holds the raw contents of ~/.codex/auth.json (plain
       # JSON, not base64 — it's passed through env:, not interpolated into a
       # shell string, so no extra encoding is needed for it to be safe).
@@ -168,6 +188,22 @@ jobs:
           if [ -n "$CODEX_AUTH_FILE" ] && [ -f "$CODEX_AUTH_FILE" ]; then
             : > "$CODEX_AUTH_FILE"
             rm --force -- "$CODEX_AUTH_FILE"
+          fi
+
+      - name: Restore Linux sandbox host settings
+        if: always() && steps.sandbox-host.outcome != 'skipped'
+        env:
+          ORIGINAL_USERNS_CLONE: ${{ steps.sandbox-host.outputs.original_userns_clone }}
+          ORIGINAL_APPARMOR_USERNS: ${{ steps.sandbox-host.outputs.original_apparmor_userns }}
+        run: |
+          if [ -n "$ORIGINAL_USERNS_CLONE" ]; then
+            sudo sysctl -w "kernel.unprivileged_userns_clone=${ORIGINAL_USERNS_CLONE}" ||
+              echo "::warning::Could not restore kernel.unprivileged_userns_clone"
+          fi
+          if [ -n "$ORIGINAL_APPARMOR_USERNS" ]; then
+            sudo sysctl -w \
+              "kernel.apparmor_restrict_unprivileged_userns=${ORIGINAL_APPARMOR_USERNS}" ||
+              echo "::warning::Could not restore AppArmor user-namespace restriction"
           fi
 
       # Delivery: fixes are already committed and pushed to the PR's own
