@@ -10,7 +10,7 @@ on:
       # Profiles select the scope prefix, install step, Gate B validation
       # command, and stack-specific fix-prompt rules — see run-loop.sh.
       profile:
-        description: backend or frontend
+        description: backend, frontend, or infrastructure
         required: true
         type: string
       # Keep script checkout aligned with the reusable workflow reference.
@@ -55,9 +55,15 @@ on:
         default: "20"
         type: string
     secrets:
-      # Pass only Codex authentication; do not inherit unrelated organization
-      # or repository secrets.
+      # Pass only the credentials needed by this workflow; do not inherit
+      # unrelated organization or repository secrets.
       CODEX_AUTH_JSON:
+        required: true
+      # GitHub App credentials let fixes and comments act as the App, so the
+      # resulting push/PR events can trigger normal repository workflows.
+      CLIENT_ID:
+        required: true
+      PRIVATE_KEY:
         required: true
 
 # A caller must grant the same permissions; reusable workflows cannot elevate them.
@@ -111,11 +117,21 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # Create the installation token before checking out the PR branch so the
+      # checkout's persisted credentials are the App token, not GITHUB_TOKEN.
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          private-key: ${{ secrets.PRIVATE_KEY }}
+
       # The PR's actual branch (not GitHub's synthetic merge ref) — fixes need
       # to be pushed back to it directly.
       - name: Check out PR head (pushable)
         uses: actions/checkout@v6
         with:
+          token: ${{ steps.app-token.outputs.token }}
           ref: ${{ github.head_ref }}
           fetch-depth: 0
           persist-credentials: true
@@ -151,6 +167,17 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
+      - uses: hashicorp/setup-terraform@v4
+        if: inputs.profile == 'infrastructure'
+        with:
+          terraform_version: "1.11.0"
+          terraform_wrapper: false
+
+      - uses: terraform-linters/setup-tflint@v4.1.0
+        if: inputs.profile == 'infrastructure'
+        with:
+          tflint_version: v0.59.1
+
       # CODEX_AUTH_JSON holds the raw contents of ~/.codex/auth.json (plain
       # JSON, not base64 — it's passed through env:, not interpolated into a
       # shell string, so no extra encoding is needed for it to be safe).
@@ -177,9 +204,9 @@ jobs:
         run: bash "${{ github.workspace }}/organization-automation/automation/codex-review-fix/run-loop.sh"
 
       # The credential only needs to exist for the run above, not for the
-      # rest of the job (delivery steps below use GH_TOKEN/github.token,
-      # never Codex auth). if: always() so this still runs even if the loop
-      # step failed or timed out.
+      # rest of the job (delivery steps below use the App token, never Codex
+      # auth). if: always() so this still runs even if the loop step failed or
+      # timed out.
       - name: Remove Codex authentication file
         if: always() && steps.codex-auth.outcome == 'success'
         env:
@@ -208,11 +235,12 @@ jobs:
 
       # Delivery: fixes are already committed and pushed to the PR's own
       # branch. Post/update one comment on the PR with the review findings +
-      # evidence for what changed. Uses GITHUB_TOKEN only (no PAT / write
-      # secret), so it works even where the org blocks Actions from creating PRs.
+      # evidence for what changed. Uses the GitHub App installation token so
+      # the automation identity is consistent for pushes, PRs, and comments.
       - name: Post review + fix evidence
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           SOURCE_PR: ${{ github.event.pull_request.number }}
           DID_FIX: ${{ steps.loop.outputs.did_fix }}
           FIX_COUNT: ${{ steps.loop.outputs.fix_count }}
@@ -300,12 +328,12 @@ jobs:
           # flattening the array-of-pages with .[][] before filtering.
           # Also require the comment's author to be this bot: matching on body
           # prefix alone means anyone who posts a comment starting with the
-          # marker text gets matched and overwritten — GITHUB_TOKEN with
+          # marker text gets matched and overwritten — the App token with
           # pull-requests:write can PATCH any comment on the repo, not just its
           # own, so this isn't merely a lookup miss, it can clobber someone
           # else's comment.
           CID=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues/${SOURCE_PR}/comments" 2>/dev/null \
-            | jq -r "[.[][] | select(.user.login==\"github-actions[bot]\" and (.body|startswith(\"$MARKER\")))][0].id")
+            | jq -r "[.[][] | select(.user.login==\"${APP_SLUG}[bot]\" and (.body|startswith(\"$MARKER\")))][0].id")
           if [ -n "$CID" ] && [ "$CID" != "null" ]; then
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${CID}" -f body="$(cat comment.md)" >/dev/null
           else

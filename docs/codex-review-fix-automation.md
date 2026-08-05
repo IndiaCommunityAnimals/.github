@@ -30,10 +30,10 @@ automation/codex-review-fix/run-loop.sh                   controller (review, ne
 automation/codex-review-fix/prompts/                       review prompt + evidence template
 ```
 
-The frontend and backend repositories each own one small
-`.github/workflows/codex-review-fix.yml` caller. Pull request events are
-local to the repository where the PR is opened, so the organization
-repository cannot replace those callers.
+The infrastructure, frontend, and backend repositories each own one small
+`.github/workflows/codex-review-fix.yml` caller. Pull request events are local
+to the repository where the PR is opened, so the organization repository
+cannot replace those callers.
 
 ## Shared prompt, not independent per-profile
 
@@ -66,6 +66,7 @@ passing an arbitrary caller-supplied path or command as a workflow input.
 |---|---|---|---|
 | `backend` | Python 3.12 | `api/app/` | `python -m compileall` + `pytest -m no_db` |
 | `frontend` | TypeScript, Vite | `src/` (excl. `*.test.ts(x)`/`*.spec.ts(x)`) | `tsc --noEmit` + `npm run test` |
+| `infrastructure` | Terraform | `infra/` | `terraform fmt` + backend-free `terraform validate` + `tflint` |
 
 ## Trigger and approval
 
@@ -81,13 +82,22 @@ against untrusted external contributions, since it only ever reacts to a PR
 that already exists in this repository, opened by someone with write access
 or by the issue-fix automation itself.
 
+The review loop creates a GitHub App installation token before checking out the
+PR branch. The checkout persists that token so validated fix commits are
+pushed as the App, and the same token is used for the evidence comment. This
+keeps the automation identity consistent and avoids the approval behavior that
+can affect workflow-created pull requests using the default `GITHUB_TOKEN`.
+
 ## Required settings
 
 For each caller repository:
 
 1. Enable GitHub Actions.
 2. Grant the organization `CODEX_AUTH_JSON` secret to the repository.
-3. Keep the caller workflow on the repository default branch.
+3. Grant the App credential secrets used by the caller (`GITHUB_APP_CLIENT_ID`
+   and `GITHUB_APP_PRIVATE_KEY`). The App must be installed on the target
+   repository with `Contents: write` and `Pull requests: write` permissions.
+4. Keep the caller workflow on the repository default branch.
 
 ## Merge and rollout order
 
@@ -109,8 +119,8 @@ repository (`git archive HEAD | tar -x`), and only applies the resulting
 patch to the authenticated checkout after every gate passes — Codex itself
 never holds push credentials or touches the real checkout.
 
-`codex-review-fix` does not do this. It runs Codex with
-`--dangerously-bypass-approvals-and-sandbox` directly against the
+`codex-review-fix` does not do this. It runs Codex with its configured
+workspace-write sandbox directly against the
 authenticated checkout, relying entirely on post-hoc gates (Gate A/A2, the
 whole-file-deletion guard, Gate B) to catch anything out of line, rather than
 never letting Codex touch the real tree in the first place. This was a
