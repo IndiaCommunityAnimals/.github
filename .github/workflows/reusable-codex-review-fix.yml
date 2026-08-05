@@ -135,6 +135,7 @@ jobs:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
           persist-credentials: true
+          path: target-repository
 
       # A fix commit triggers pull_request.synchronize. Stop that event here
       # so one auto-fix cannot start another complete review-fix run forever.
@@ -150,7 +151,6 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-          path: target-repository
 
       - uses: actions/setup-python@v6
         if: steps.trigger-guard.outputs.skip != 'true' && inputs.profile == 'backend'
