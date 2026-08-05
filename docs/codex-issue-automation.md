@@ -164,9 +164,8 @@ For each caller repository:
 3. Enable **Allow GitHub Actions to create and approve pull requests**.
 4. Permit `codex/issue-*` branch creation under repository rulesets.
 5. Grant the organization `CODEX_AUTH_JSON` secret to the repository.
-6. Grant the caller `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_PRIVATE_KEY`
-   credentials, mapped to the reusable workflow's `CLIENT_ID` and
-   `PRIVATE_KEY` secrets.
+6. Grant the caller `CLIENT_ID` and `PRIVATE_KEY` Actions secrets for the
+   GitHub App credentials.
 7. Keep the caller workflow on the repository default branch.
 
 The caller passes `CODEX_AUTH_JSON`, `CLIENT_ID`, and `PRIVATE_KEY` explicitly.

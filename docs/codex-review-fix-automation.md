@@ -94,8 +94,8 @@ For each caller repository:
 
 1. Enable GitHub Actions.
 2. Grant the organization `CODEX_AUTH_JSON` secret to the repository.
-3. Grant the App credential secrets used by the caller (`GITHUB_APP_CLIENT_ID`
-   and `GITHUB_APP_PRIVATE_KEY`). The App must be installed on the target
+3. Grant the App credential secrets used by the caller (`CLIENT_ID` and
+   `PRIVATE_KEY`). The App must be installed on the target
    repository with `Contents: write` and `Pull requests: write` permissions.
 4. Keep the caller workflow on the repository default branch.
 
