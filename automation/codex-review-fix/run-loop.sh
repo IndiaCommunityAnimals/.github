@@ -72,10 +72,10 @@ case "$PROFILE" in
     ;;
 esac
 
-# In scope for fixes: product code under the profile's prefix. Frontend
-# additionally excludes test files (so autofix can't weaken a test to pass
-# rather than fixing the code) — backend has no test files under api/app/ to
-# begin with, so no exclusion is needed there.
+# In scope for fixes: product code under the profile's prefix. Frontend test
+# files remain excluded. Infrastructure test files are allowed temporarily so
+# the fixer can use them to validate a change; validation_only_file() removes
+# those edits before anything is staged for the auto-fix commit.
 in_scope() {
   case "$1" in
     "$SCOPE_PREFIX"*)
@@ -86,6 +86,20 @@ in_scope() {
       ;;
     *) return 1 ;;
   esac
+}
+
+# Infrastructure tests may be created or edited as a temporary validation aid,
+# but they must never be part of an automatic-fix commit. Tracked files are
+# restored to the round's starting commit; newly created files are removed.
+validation_only_file() {
+  if [ "$PROFILE" = infrastructure ]; then
+    case "$1" in
+      */test/* | */tests/* | test.hcl | */test.hcl | *.test.hcl | *.tftest.hcl)
+        return 0
+        ;;
+    esac
+  fi
+  return 1
 }
 
 profile_install() {
@@ -181,8 +195,14 @@ EOF
       ;;
     infrastructure)
       cat <<'EOF'
-- Only modify infrastructure code under 'infra/'. Never edit CI, docs, state,
-  plans, tfvars, credentials, or validation instructions.
+- Only modify infrastructure product code under 'infra/'. Never edit CI, docs,
+  state, plans, tfvars, credentials, or validation instructions.
+- You may create or edit Terraform test files ('test.hcl', '*.test.hcl',
+  '*.tftest.hcl', or files under a 'test/' or 'tests/' directory) temporarily
+  when needed to validate the agreed infrastructure fix. These files are
+  validation-only: they are restored or removed before the automatic commit
+  and must never be included in the commit. Do not weaken or delete tests just
+  to make validation pass.
 - Only modify a PRE-EXISTING file if a finding below cites it (by its
   file:line reference). Do not touch any other existing file, no matter how
   related it seems. Creating a genuinely NEW file is fine if a fix needs one.
@@ -508,6 +528,7 @@ $CURRENT_FINDINGS_TEXT"
   while IFS= read -r line; do
     f="${line:3}"; [ -z "$f" ] && continue
     if ! in_scope "$f"; then continue; fi   # already handled by Gate A above
+    if validation_only_file "$f"; then continue; fi
     grep -qxF "$f" <<< "$CITED_FILES" && continue
     if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
       git checkout -- "$f" 2>/dev/null && UNCITED="$UNCITED $f"
@@ -583,6 +604,29 @@ $CURRENT_FINDINGS_TEXT"
   # ---- GATE B: validate (compile/typecheck + tests) ----
   if ! profile_validate; then
     reset_round "$ROUND_START"; STOP_REASON="blocked: fix failed validation — $(profile_validate_label) (round $ROUND)"; break
+  fi
+
+  # Test files are permitted only as a validation aid. Remove them after the
+  # validation gate succeeds, while retaining the actual product fix.
+  VALIDATION_ONLY_FILES=""
+  while IFS= read -r line; do
+    f="${line:3}"; [ -z "$f" ] && continue
+    if ! validation_only_file "$f"; then continue; fi
+    VALIDATION_ONLY_FILES="$VALIDATION_ONLY_FILES $f"
+    if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+      git checkout "$ROUND_START" -- "$f"
+    else
+      rm -rf -- "$f"
+    fi
+  done < <(git status --porcelain)
+  if [ -n "$VALIDATION_ONLY_FILES" ]; then
+    git add -A
+    echo "::notice::Discarded validation-only test changes before commit:$VALIDATION_ONLY_FILES"
+  fi
+
+  if git diff --cached --quiet; then
+    STOP_REASON="validation-only test changes discarded; no product change to commit (round $ROUND)"
+    break
   fi
 
   # ---- Commit the round ----

@@ -74,26 +74,6 @@ jobs:
             } = require(process.env.VERIFIER_PATH);
 
             const definitions = {
-              'bug': {
-                color: 'd73a4a',
-                description: 'Something is not working'
-              },
-              'needs reproduction': {
-                color: 'fbca04',
-                description: 'Issue needs reproducible steps or evidence'
-              },
-              'feature': {
-                color: 'a2eeef',
-                description: 'New feature or enhancement request'
-              },
-              'technical task': {
-                color: '5319e7',
-                description: 'Engineering or maintenance task'
-              },
-              'codex-fix-requested': {
-                color: '0e8a16',
-                description: 'Requests automated Codex implementation'
-              },
               [process.env.APPROVAL_LABEL]: {
                 color: '1d76db',
                 description: 'Maintainer approval for external contributor automation'
@@ -127,12 +107,15 @@ jobs:
               }
             }
 
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              labels: automationLabelsForIssue(context.payload.issue)
-            });
+            const automationLabels = automationLabelsForIssue(context.payload.issue);
+            if (automationLabels.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: automationLabels
+              });
+            }
 
       - name: Verify issue and target branch
         id: verify

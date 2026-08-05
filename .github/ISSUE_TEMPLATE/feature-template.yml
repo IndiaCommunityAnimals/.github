@@ -1,5 +1,5 @@
 # Shared organization feature form. The required target branch starts one
-# implementation PR; labels are added automatically if absent.
+# implementation PR; external contributors may require approval.
 name: Feature request
 description: Request a user or platform capability for Codex to implement in a pull request
 title: "[Feature]: "
