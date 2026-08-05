@@ -21,6 +21,13 @@ Focus on four things, in priority order:
    directory. This is a presence check, not a coverage percentage — do not
    attempt to estimate or state a coverage number.
 
+   Test-coverage findings are advisory. Never require the fixer to edit a test
+   file to make a finding disappear. The fixer may temporarily create or edit
+   infrastructure test files such as `test.hcl`, `*.test.hcl`, `*.tftest.hcl`,
+   and files under `test/` or `tests/` only to validate an agreed product fix.
+   The loop restores or removes those files before committing, so they must
+   never appear in an automatic-fix commit.
+
 ## What to skip
 
 - Skip nitpicks that a linter or formatter would already catch.

@@ -60,6 +60,17 @@ What genuinely differs per stack lives in `run-loop.sh` itself, selected by
 Adding a new stack means adding a case to `run-loop.sh` deliberately, not
 passing an arbitrary caller-supplied path or command as a workflow input.
 
+### Temporary infrastructure tests
+
+Infrastructure test files may be created or edited temporarily when they are
+needed to validate an agreed product fix. This includes `test.hcl`,
+`*.test.hcl`, `*.tftest.hcl`, and files under `test/` or `tests/`. Gate B runs
+with those changes present, then the controller restores tracked test files to
+the round's starting commit and removes newly created test files before
+staging and committing. Test changes can therefore support validation, but
+never appear in an automatic-fix commit. Test-coverage findings remain
+advisory and are not a reason to weaken or delete a test.
+
 ## Profiles and validation
 
 | Profile | Repository stack | Scope prefix | Gate B validation |

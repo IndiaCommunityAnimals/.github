@@ -135,15 +135,30 @@ jobs:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
           persist-credentials: true
+
+      # A fix commit triggers pull_request.synchronize. Stop that event here
+      # so one auto-fix cannot start another complete review-fix run forever.
+      - name: Detect Codex auto-fix commit
+        id: trigger-guard
+        env:
+          REPOSITORY_ROOT: ${{ github.workspace }}/target-repository
+        run: |
+          subject="$(git -C "$REPOSITORY_ROOT" log -1 --format=%s)"
+          if [[ "$subject" == "Apply Codex auto-fix round "*" [codex-autofix]" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping synchronize event caused by a Codex auto-fix commit."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
           path: target-repository
 
       - uses: actions/setup-python@v6
-        if: inputs.profile == 'backend'
+        if: steps.trigger-guard.outputs.skip != 'true' && inputs.profile == 'backend'
         with:
           python-version: ${{ inputs.python_version }}
 
       - uses: actions/setup-node@v6
-        if: inputs.profile == 'frontend'
+        if: steps.trigger-guard.outputs.skip != 'true' && inputs.profile == 'frontend'
         with:
           node-version: ${{ inputs.node_version }}
 
@@ -155,6 +170,7 @@ jobs:
       # narrowly scoped to this job.
       - name: Prepare Codex Linux sandbox
         id: sandbox-host
+        if: steps.trigger-guard.outputs.skip != 'true'
         run: |
           if sysctl kernel.unprivileged_userns_clone >/dev/null 2>&1; then
             echo "original_userns_clone=$(sysctl -n kernel.unprivileged_userns_clone)" \
@@ -168,13 +184,13 @@ jobs:
           fi
 
       - uses: hashicorp/setup-terraform@v4
-        if: inputs.profile == 'infrastructure'
+        if: steps.trigger-guard.outputs.skip != 'true' && inputs.profile == 'infrastructure'
         with:
           terraform_version: "1.11.0"
           terraform_wrapper: false
 
       - uses: terraform-linters/setup-tflint@v4.1.0
-        if: inputs.profile == 'infrastructure'
+        if: steps.trigger-guard.outputs.skip != 'true' && inputs.profile == 'infrastructure'
         with:
           tflint_version: v0.59.1
 
@@ -183,6 +199,7 @@ jobs:
       # shell string, so no extra encoding is needed for it to be safe).
       - name: Seed Codex auth
         id: codex-auth
+        if: steps.trigger-guard.outputs.skip != 'true'
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
         run: |
@@ -195,12 +212,14 @@ jobs:
           echo "auth_file=${HOME}/.codex/auth.json" >> "$GITHUB_OUTPUT"
 
       - name: Install Codex CLI
+        if: steps.trigger-guard.outputs.skip != 'true'
         # Pinned so behavior/output can't silently shift when a new CLI release
         # ships; bump inputs.codex_cli_version above to update deliberately.
         run: npm install -g "@openai/codex@${{ inputs.codex_cli_version }}"
 
       - name: Run review-fix loop
         id: loop
+        if: steps.trigger-guard.outputs.skip != 'true'
         run: bash "${{ github.workspace }}/organization-automation/automation/codex-review-fix/run-loop.sh"
 
       # The credential only needs to exist for the run above, not for the
@@ -208,7 +227,7 @@ jobs:
       # auth). if: always() so this still runs even if the loop step failed or
       # timed out.
       - name: Remove Codex authentication file
-        if: always() && steps.codex-auth.outcome == 'success'
+        if: always() && steps.trigger-guard.outputs.skip != 'true' && steps.codex-auth.outcome == 'success'
         env:
           CODEX_AUTH_FILE: ${{ steps.codex-auth.outputs.auth_file }}
         run: |
@@ -238,6 +257,7 @@ jobs:
       # evidence for what changed. Uses the GitHub App installation token so
       # the automation identity is consistent for pushes, PRs, and comments.
       - name: Post review + fix evidence
+        if: always() && steps.trigger-guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}

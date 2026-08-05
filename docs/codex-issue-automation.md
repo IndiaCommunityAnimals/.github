@@ -46,8 +46,9 @@ which must name an existing branch in that repository. The selected branch is
 checked out as the implementation baseline and becomes the generated pull
 request's base. The field starts the caller workflow even when the repository
 does not have the automation labels yet. The shared workflow creates any missing
-category, `codex-fix-requested`, and `codex-fix-approved` labels in the caller
-repository, then applies the request and category labels to the issue.
+the optional `codex-fix-approved` label in the caller repository. No request
+label is required; trusted repository contributors run automatically after
+validation.
 
 All forms require a safety confirmation that secrets, credentials, tokens, and
 sensitive personal data were removed. Supporting evidence, dependencies,
@@ -147,9 +148,11 @@ one Codex implementation PR. The **General issue or discussion** form is
 ignored by the caller because it does not contain a target-branch field.
 
 Labels are metadata, not the trigger. Caller workflows start on an implementation
-issue's target-branch field, and the reusable workflow provisions and attaches
-the appropriate labels. This avoids GitHub's behavior of silently omitting Issue
-Form labels that do not already exist in the repository.
+issue's target-branch field. The reusable workflow provisions only the
+`codex-fix-approved` label, which is needed for external-contributor approval;
+trusted repository contributors do not need a label. This avoids GitHub's
+behavior of silently omitting Issue Form labels that do not already exist in the
+repository.
 
 Owners, organization members, and collaborators can proceed after validation.
 An external contributor requires a maintainer to add `codex-fix-approved`.
