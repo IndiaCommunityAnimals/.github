@@ -164,11 +164,16 @@ For each caller repository:
 3. Enable **Allow GitHub Actions to create and approve pull requests**.
 4. Permit `codex/issue-*` branch creation under repository rulesets.
 5. Grant the organization `CODEX_AUTH_JSON` secret to the repository.
-6. Keep the caller workflow on the repository default branch.
+6. Grant the caller `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_PRIVATE_KEY`
+   credentials, mapped to the reusable workflow's `CLIENT_ID` and
+   `PRIVATE_KEY` secrets.
+7. Keep the caller workflow on the repository default branch.
 
-Only `CODEX_AUTH_JSON` is passed explicitly. The caller does not use
-`secrets: inherit`, so unrelated organization or repository secrets are not
-made available to the reusable workflow.
+The caller passes `CODEX_AUTH_JSON`, `CLIENT_ID`, and `PRIVATE_KEY` explicitly.
+It does not use `secrets: inherit`, so unrelated organization or repository
+secrets are not made available to the reusable workflow. The GitHub App used
+for publication must be installed on the target repository with `Contents:
+write` and `Pull requests: write` permissions.
 
 The target checkout disables persisted Git credentials. Codex authentication
 is restored only after repository setup, then removed before publication. The

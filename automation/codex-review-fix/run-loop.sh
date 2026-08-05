@@ -19,7 +19,8 @@
 # way to make Codex spawn its own sub-agent from outside, so this — resuming
 # two real sessions — is the closest equivalent.
 #
-# Profiles (backend, frontend, ...) are a fixed enum selecting the scope
+# Profiles (backend, frontend, infrastructure, ...) are a fixed enum selecting
+# the scope
 # prefix, install step, Gate B validation command, and the fix prompt's
 # stack-specific rules. Adding a stack means adding a case here
 # deliberately, not accepting an arbitrary caller-supplied path or command.
@@ -62,6 +63,9 @@ case "$PROFILE" in
   frontend)
     SCOPE_PREFIX="src/"
     ;;
+  infrastructure)
+    SCOPE_PREFIX="infra/"
+    ;;
   *)
     echo "::error::Unknown profile: $PROFILE"
     exit 1
@@ -93,6 +97,10 @@ profile_install() {
       npm ci --no-audit --no-fund >/dev/null 2>&1 \
         || npm install --no-audit --no-fund >/dev/null 2>&1 || true
       ;;
+    infrastructure)
+      terraform version >/dev/null
+      tflint --version >/dev/null
+      ;;
   esac
 }
 
@@ -104,6 +112,15 @@ profile_validate() {
     frontend)
       ( npx --no-install tsc --noEmit && npm run test --silent )
       ;;
+    infrastructure)
+      terraform fmt -check -recursive -no-color -diff &&
+        (
+          cd infra/environments/preprod &&
+          terraform init -backend=false -input=false -no-color &&
+          terraform validate -no-color
+        ) &&
+        tflint --recursive --no-color
+      ;;
   esac
 }
 
@@ -111,6 +128,7 @@ profile_validate_label() {
   case "$PROFILE" in
     backend) echo "pytest -m no_db" ;;
     frontend) echo "tsc --noEmit / vitest" ;;
+    infrastructure) echo "terraform fmt / validate / tflint" ;;
   esac
 }
 
@@ -159,6 +177,24 @@ EOF
   never grounds for deletion unless a finding below explicitly says so. When
   code has defects, fix EACH defect in place — never delete it to make a
   finding disappear. (Whole-file deletions are auto-reverted.)
+EOF
+      ;;
+    infrastructure)
+      cat <<'EOF'
+- Only modify infrastructure code under 'infra/'. Never edit CI, docs, state,
+  plans, tfvars, credentials, or validation instructions.
+- Only modify a PRE-EXISTING file if a finding below cites it (by its
+  file:line reference). Do not touch any other existing file, no matter how
+  related it seems. Creating a genuinely NEW file is fine if a fix needs one.
+  (Uncited existing-file changes are auto-reverted.)
+- Do NOT run git (no add/commit/stash). Make minimal edits.
+- Do NOT run terraform plan, apply, destroy, import, state commands, or
+  commands requiring cloud credentials.
+- Preserve Terraform's provider, networking, IAM, state, and data-protection
+  boundaries. Do not make replacement-causing changes without explicit review.
+- You may remove dead or unsafe LINES within a file ONLY when doing so is
+  itself one of the findings below — you may not delete an entire file or an
+  entire Terraform resource block. Whole-file deletions are auto-reverted.
 EOF
       ;;
   esac

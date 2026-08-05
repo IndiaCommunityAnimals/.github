@@ -1,5 +1,6 @@
 # Reusable organization workflow. Repository-local callers own the issue event
-# and token permissions; this file owns verification, implementation, and PR logic.
+# and token permissions; this file owns verification, implementation, and PR
+# logic.
 name: Reusable Codex Issue Fix
 
 on:
@@ -17,8 +18,14 @@ on:
         default: codex-fix-approved
         type: string
     secrets:
-      # Pass only Codex authentication; do not inherit unrelated organization secrets.
+      # Pass only Codex authentication; do not inherit unrelated organization
+      # secrets.
       CODEX_AUTH_JSON:
+        required: true
+      # GitHub App credentials used to publish branches and create PRs.
+      CLIENT_ID:
+        required: true
+      PRIVATE_KEY:
         required: true
 
 # A caller must grant the same permissions; reusable workflows cannot elevate them.
@@ -382,20 +389,29 @@ jobs:
               echo "::warning::Could not restore AppArmor user-namespace restriction"
           fi
 
-      # Only this step receives a GitHub token. Codex credentials have already
-      # been removed and the candidate patch has passed secret scanning.
+      # Generate a GitHub App token so the PR triggers downstream workflows.
+      - name: Generate GitHub App token
+        if: steps.fix.outputs.patch_ready == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          private-key: ${{ secrets.PRIVATE_KEY }}
+
+      # Use the GitHub App token for the push so the PR is attributed to the
+      # App rather than github-actions[bot].
       - name: Publish candidate branch
         if: steps.fix.outputs.patch_ready == 'true'
         id: publish
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TARGET_BRANCH: ${{ steps.verify.outputs.target_branch }}
           REPOSITORY_ROOT: ${{ github.workspace }}/target-repository
           PATCH_FILE: ${{ runner.temp }}/codex-issue-fix/agent.patch
         run: |
-          git -C "$REPOSITORY_ROOT" config user.name "github-actions[bot]"
+          git -C "$REPOSITORY_ROOT" config user.name "animal-automation-bot[bot]"
           git -C "$REPOSITORY_ROOT" config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+            "animal-automation-bot[bot]@users.noreply.github.com"
           (
             cd "$REPOSITORY_ROOT"
             gh auth setup-git
@@ -423,6 +439,7 @@ jobs:
           )
           echo "did_fix=true" >> "$GITHUB_OUTPUT"
 
+      # Use the GitHub App token for PR creation so downstream workflows run.
       - name: Open pull request
         if: steps.publish.outputs.did_fix == 'true'
         id: pull-request
@@ -431,6 +448,7 @@ jobs:
           TARGET_BRANCH: ${{ steps.verify.outputs.target_branch }}
           RESULT_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.json
         with:
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const fs = require('fs');
             const issue = context.payload.issue;
