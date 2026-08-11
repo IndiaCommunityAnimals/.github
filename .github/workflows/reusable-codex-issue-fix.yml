@@ -13,9 +13,14 @@ on:
         default: main
         type: string
       approval_label:
-        description: Label required for an external contributor's issue
+        description: Label that a maintainer adds to authorize the coding agent
         required: false
-        default: codex-fix-approved
+        default: codex-run-approved
+        type: string
+      request_label:
+        description: Label automatically added to an unapproved issue
+        required: false
+        default: codex-run-requested
         type: string
     secrets:
       # Pass only Codex authentication; do not inherit unrelated organization
@@ -46,6 +51,7 @@ jobs:
     timeout-minutes: 45
     env:
       APPROVAL_LABEL: ${{ inputs.approval_label }}
+      REQUEST_LABEL: ${{ inputs.request_label }}
       ISSUE_NUMBER: ${{ github.event.issue.number }}
       FIX_BRANCH: codex/issue-${{ github.event.issue.number }}
 
@@ -76,7 +82,11 @@ jobs:
             const definitions = {
               [process.env.APPROVAL_LABEL]: {
                 color: '1d76db',
-                description: 'Maintainer approval for external contributor automation'
+                description: 'Maintainer approval to run Codex issue automation'
+              },
+              [process.env.REQUEST_LABEL]: {
+                color: 'fbca04',
+                description: 'Issue requested Codex automation and awaits maintainer approval'
               }
             };
 
@@ -107,7 +117,34 @@ jobs:
               }
             }
 
-            const automationLabels = automationLabelsForIssue(context.payload.issue);
+            let maintainer = false;
+            try {
+              const permission = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: context.payload.issue.user.login
+              });
+              maintainer = ['admin', 'maintain'].includes(permission.data.permission);
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            // Editing a contributor issue invalidates its previous approval.
+            // The maintainer must review the changed request again.
+            if (context.payload.action === 'edited' && !maintainer &&
+                labels.includes(process.env.APPROVAL_LABEL)) {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: process.env.APPROVAL_LABEL
+              });
+            }
+
+            const automationLabels = automationLabelsForIssue(context.payload.issue, maintainer)
+              .map((label) => label === 'codex-run-approved'
+                ? process.env.APPROVAL_LABEL
+                : process.env.REQUEST_LABEL);
             if (automationLabels.length > 0) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
@@ -129,19 +166,67 @@ jobs:
             const path = require('path');
             const {
               extractTargetBranch,
-              isTrustedAssociation,
               validateIssue
             } = require(process.env.VERIFIER_PATH);
 
-            const issue = context.payload.issue;
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
             const labels = issue.labels.map((label) =>
               typeof label === 'string' ? label : label.name
             );
             const validation = validateIssue(issue);
             const targetBranch = extractTargetBranch(issue.body || '');
-            const trusted = isTrustedAssociation(issue.author_association);
             const approved = labels.includes(process.env.APPROVAL_LABEL);
             const problems = [...validation.problems];
+            let approvalActor = '';
+
+            const hasMaintainerPermission = async (login) => {
+              try {
+                const permission = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  username: login
+                });
+                return ['admin', 'maintain'].includes(permission.data.permission);
+              } catch (error) {
+                if (error.status === 404) return false;
+                throw error;
+              }
+            };
+
+            // A maintainer-authored issue is auto-approved by the label step.
+            // For everyone else, verify that the approval label was actually
+            // added by a current repository maintainer. Checking only the
+            // current label would let a user with label permissions self-approve.
+            if (approved && !(await hasMaintainerPermission(issue.user.login))) {
+              const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                per_page: 100
+              });
+              const approvalEvent = events
+                .filter((event) => event.event === 'labeled' &&
+                  event.label?.name === process.env.APPROVAL_LABEL)
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+              if (!approvalEvent || !(await hasMaintainerPermission(approvalEvent.actor?.login))) {
+                problems.push(`Only a repository maintainer may add the \`${process.env.APPROVAL_LABEL}\` label.`);
+              } else {
+                approvalActor = approvalEvent.actor.login;
+              }
+            } else if (approved) {
+              approvalActor = issue.user.login;
+            }
+
+            if (!approved) {
+              problems.push(
+                `A maintainer must add the \`${process.env.APPROVAL_LABEL}\` label ` +
+                'before the coding agent can run.'
+              );
+            }
 
             if (!targetBranch) {
               problems.push('Add a `### Target branch` section containing one branch name.');
@@ -161,10 +246,10 @@ jobs:
               }
             }
 
-            if (!trusted && !approved) {
+            if (!approved) {
               problems.push(
                 `A maintainer must add the \`${process.env.APPROVAL_LABEL}\` label ` +
-                'before an external contributor can run the coding agent.'
+                'before the coding agent can run.'
               );
             }
 
@@ -190,6 +275,7 @@ jobs:
 
             core.setOutput('eligible', problems.length === 0 ? 'true' : 'false');
             core.setOutput('target_branch', targetBranch || '');
+            core.setOutput('approval_actor', approvalActor);
             core.setOutput('problems_json', JSON.stringify(problems));
 
       # Reuse one marked bot comment so edits do not create notification spam.
@@ -430,6 +516,10 @@ jobs:
         env:
           TARGET_BRANCH: ${{ steps.verify.outputs.target_branch }}
           RESULT_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.json
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          APPROVAL_ACTOR: ${{ steps.verify.outputs.approval_actor }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          TRIGGER_ACTOR: ${{ github.actor }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -482,7 +572,14 @@ jobs:
 
             ## Documentation
 
-            ${result.documentation || 'No documentation update was required.'}`
+            ${result.documentation || 'No documentation update was required.'}
+
+            ## Automation audit
+
+            - Issue author: @${process.env.ISSUE_AUTHOR}
+            - Approval maintainer: @${process.env.APPROVAL_ACTOR}
+            - Triggered by: @${process.env.TRIGGER_ACTOR}
+            - Workflow run: ${process.env.WORKFLOW_RUN_ID}`
             });
             core.setOutput('url', pull.data.html_url);
 
@@ -496,6 +593,10 @@ jobs:
           FIX_REASON: ${{ steps.fix.outputs.stop_reason }}
           PR_URL: ${{ steps.pull-request.outputs.url }}
           TARGET_BRANCH: ${{ steps.verify.outputs.target_branch }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          APPROVAL_ACTOR: ${{ steps.verify.outputs.approval_actor }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          TRIGGER_ACTOR: ${{ github.actor }}
           RESULT_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.json
           RESULT_SAFE_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.safe
         with:
@@ -537,6 +638,10 @@ jobs:
             ### 🤖 Codex issue automation
 
             - Target branch: \`${process.env.TARGET_BRANCH}\`
+            - Issue author: @${process.env.ISSUE_AUTHOR}
+            - Approval maintainer: @${process.env.APPROVAL_ACTOR || 'not approved'}
+            - Triggered by: @${process.env.TRIGGER_ACTOR}
+            - Workflow run: [${process.env.WORKFLOW_RUN_ID}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.WORKFLOW_RUN_ID})
             - Result: ${stopReason}
             - ${prLine}${details}`;
 

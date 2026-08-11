@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Shared controller for the organization Codex review-fix loop. Runs in place
-# against an authenticated checkout of the caller repository (PROFILE selects
-# which repository stack it's running against); fixes commit and push directly
+# against an authenticated checkout of the caller repository; fixes commit and push directly
 # to the PR's own branch.
 #
 # One job. Each round: review the fix branch; if "needs-changes", let Codex
@@ -19,12 +18,6 @@
 # way to make Codex spawn its own sub-agent from outside, so this — resuming
 # two real sessions — is the closest equivalent.
 #
-# Profiles (backend, frontend, infrastructure, ...) are a fixed enum selecting
-# the scope
-# prefix, install step, Gate B validation command, and the fix prompt's
-# stack-specific rules. Adding a stack means adding a case here
-# deliberately, not accepting an arbitrary caller-supplied path or command.
-#
 # Hardening (all from the loop reviewing itself):
 #  * All scratch files live in $WORK, OUTSIDE the repo tree, so Gate A can't
 #    delete the review prompt, evidence template, or the evidence itself.
@@ -41,7 +34,6 @@ DELETION_LINE_THRESHOLD="${DELETION_LINE_THRESHOLD:?}" # flag a round that remov
 DELETION_RATIO="${DELETION_RATIO:?}"                   # ...or removes this many times more than it adds
 BASE_SHA="${BASE_SHA:?}"
 SRC_BRANCH="${SRC_BRANCH:?}"           # the PR's own branch — fixes commit and push HERE, no separate branch
-PROFILE="${PROFILE:?}"                 # backend or frontend — selects scope/install/validate below
 REPOSITORY_ROOT="${REPOSITORY_ROOT:?}" # authenticated checkout of the PR's own branch
 # workspace-write, not the full bypass: confirmed live that it neither hangs
 # nor blocks in-place edits or `codex exec resume` (the negotiation loop's
@@ -51,178 +43,40 @@ REPOSITORY_ROOT="${REPOSITORY_ROOT:?}" # authenticated checkout of the PR's own 
 # unaffected: sandboxing restricts WHERE Codex can act, not what it's
 # allowed to do within the workspace, so a sandboxed Codex can still make an
 # in-scope-by-path-but-wrong edit or try to stage/commit past a gate.
-CODEX=(codex exec --sandbox workspace-write --skip-git-repo-check)
+CODEX=(
+  codex exec
+  --sandbox workspace-write
+  --skip-git-repo-check
+  --config 'mcp_servers.aws-knowledge.url="https://knowledge-mcp.global.api.aws"'
+  --config 'mcp_servers.aws-knowledge.enabled=true'
+)
+if command -v uvx >/dev/null 2>&1; then
+  CODEX+=(
+    --config 'mcp_servers.aws-docs.command="uvx"'
+    --config 'mcp_servers.aws-docs.args=["awslabs.aws-documentation-mcp-server@latest"]'
+    --config 'mcp_servers.aws-docs.enabled=true'
+  )
+fi
+if [ -n "${TERRAFORM_MCP_SERVER:-}" ] && [ -x "$TERRAFORM_MCP_SERVER" ]; then
+  CODEX+=(
+    --config "mcp_servers.terraform.command=\"$TERRAFORM_MCP_SERVER\""
+    --config 'mcp_servers.terraform.args=["stdio"]'
+    --config 'mcp_servers.terraform.enabled=true'
+  )
+fi
 
 cd "$REPOSITORY_ROOT"
 
-# ---- Profile-specific: scope prefix, install, and Gate B validation ----
-case "$PROFILE" in
-  backend)
-    SCOPE_PREFIX="api/app/"
-    ;;
-  frontend)
-    SCOPE_PREFIX="src/"
-    ;;
-  infrastructure)
-    SCOPE_PREFIX="infra/"
-    ;;
-  *)
-    echo "::error::Unknown profile: $PROFILE"
-    exit 1
-    ;;
-esac
-
-# In scope for fixes: product code under the profile's prefix. Frontend test
-# files remain excluded. Infrastructure test files are allowed temporarily so
-# the fixer can use them to validate a change; validation_only_file() removes
-# those edits before anything is staged for the auto-fix commit.
-in_scope() {
-  case "$1" in
-    "$SCOPE_PREFIX"*)
-      if [ "$PROFILE" = frontend ]; then
-        case "$1" in *.test.ts | *.test.tsx | *.spec.ts | *.spec.tsx) return 1 ;; esac
-      fi
-      return 0
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-# Infrastructure tests may be created or edited as a temporary validation aid,
-# but they must never be part of an automatic-fix commit. Tracked files are
-# restored to the round's starting commit; newly created files are removed.
-validation_only_file() {
-  if [ "$PROFILE" = infrastructure ]; then
-    case "$1" in
-      */test/* | */tests/* | test.hcl | */test.hcl | *.test.hcl | *.tftest.hcl)
-        return 0
-        ;;
-    esac
-  fi
-  return 1
-}
-
-profile_install() {
-  case "$PROFILE" in
-    backend)
-      ( cd api && pip install -q -r requirements.txt ) || true
-      ;;
-    frontend)
-      npm ci --no-audit --no-fund >/dev/null 2>&1 \
-        || npm install --no-audit --no-fund >/dev/null 2>&1 || true
-      ;;
-    infrastructure)
-      terraform version >/dev/null
-      tflint --version >/dev/null
-      ;;
-  esac
-}
-
-profile_validate() {
-  case "$PROFILE" in
-    backend)
-      ( cd api && python -m compileall -q app && pytest -m no_db -q )
-      ;;
-    frontend)
-      ( npx --no-install tsc --noEmit && npm run test --silent )
-      ;;
-    infrastructure)
-      terraform fmt -check -recursive -no-color -diff &&
-        (
-          cd infra/environments/preprod &&
-          terraform init -backend=false -input=false -no-color &&
-          terraform validate -no-color
-        ) &&
-        tflint --recursive --no-color
-      ;;
-  esac
-}
-
-profile_validate_label() {
-  case "$PROFILE" in
-    backend) echo "pytest -m no_db" ;;
-    frontend) echo "tsc --noEmit / vitest" ;;
-    infrastructure) echo "terraform fmt / validate / tflint" ;;
-  esac
-}
-
-# The FIX_PROMPT "Rules:" bullets genuinely differ in wording per stack (e.g.
-# "function/class" vs "function/component", "the build runs 'tsc --noEmit'"
-# is frontend-only) — not just a path substitution — so each profile owns its
-# full bullet block rather than a templated string.
-profile_fix_rules() {
-  case "$PROFILE" in
-    backend)
-      cat <<'EOF'
-- Only modify files under 'api/app/'. Never edit tests, CI, or config.
-- Only modify a PRE-EXISTING file if a finding below cites it (by its
-  file:line reference). Do not touch any other existing file, no matter how
-  related it seems — e.g. do not wire a fix into application startup,
-  request handling, or any other file the findings don't mention. Creating a
-  genuinely NEW file is fine if a fix needs one. (Uncited existing-file
-  changes are auto-reverted.)
-- Do NOT run git (no add/commit/stash). Make minimal edits.
-- You may remove dead or unsafe LINES within a file ONLY when doing so is
-  itself one of the findings below (justify each in the evidence) — you may
-  NOT delete an entire file or an entire function/class. A file (or a
-  function within it) may be wired up or needed by a later change, so
-  "nothing calls it" is never grounds for deletion on its own, and is never
-  grounds for deletion unless a finding below explicitly says so. When code
-  has defects, fix EACH defect in place — never delete it to make a finding
-  disappear. (Whole-file deletions are auto-reverted.)
-EOF
-      ;;
-    frontend)
-      cat <<'EOF'
-- Only modify product code under 'src/'. Never edit test files
-  (*.test.ts/tsx), CI, or config.
-- Only modify a PRE-EXISTING file if a finding below cites it (by its
-  file:line reference). Do not touch any other existing file, no matter how
-  related it seems — e.g. do not wire a fix into app startup, routing, or any
-  other file the findings don't mention. Creating a genuinely NEW file is
-  fine if a fix needs one. (Uncited existing-file changes are auto-reverted.)
-- Do NOT run git (no add/commit/stash). Make minimal edits. Keep TypeScript
-  strict-clean (the build runs 'tsc --noEmit').
-- You may remove dead or unsafe LINES within a file ONLY when doing so is
-  itself one of the findings below (justify each in the evidence) — you may
-  NOT delete an entire file or an entire function/component. A file (or a
-  function within it) may be wired up or needed by a later change, so
-  "nothing imports it" is never grounds for deletion on its own, and is
-  never grounds for deletion unless a finding below explicitly says so. When
-  code has defects, fix EACH defect in place — never delete it to make a
-  finding disappear. (Whole-file deletions are auto-reverted.)
-EOF
-      ;;
-    infrastructure)
-      cat <<'EOF'
-- Only modify infrastructure product code under 'infra/'. Never edit CI, docs,
-  state, plans, tfvars, credentials, or validation instructions.
-- You may create or edit Terraform test files ('test.hcl', '*.test.hcl',
-  '*.tftest.hcl', or files under a 'test/' or 'tests/' directory) temporarily
-  when needed to validate the agreed infrastructure fix. These files are
-  validation-only: they are restored or removed before the automatic commit
-  and must never be included in the commit. Do not weaken or delete tests just
-  to make validation pass.
-- Only modify a PRE-EXISTING file if a finding below cites it (by its
-  file:line reference). Do not touch any other existing file, no matter how
-  related it seems. Creating a genuinely NEW file is fine if a fix needs one.
-  (Uncited existing-file changes are auto-reverted.)
-- Do NOT run git (no add/commit/stash). Make minimal edits.
-- Do NOT run terraform plan, apply, destroy, import, state commands, or
-  commands requiring cloud credentials.
-- Preserve Terraform's provider, networking, IAM, state, and data-protection
-  boundaries. Do not make replacement-causing changes without explicit review.
-- You may remove dead or unsafe LINES within a file ONLY when doing so is
-  itself one of the findings below — you may not delete an entire file or an
-  entire Terraform resource block. Whole-file deletions are auto-reverted.
-EOF
-      ;;
-  esac
-}
+FIX_RULES='- Modify only files required by the agreed findings. Do not infer a repository folder layout.
+- Every existing or new file you change must be cited by a finding using file:line.
+- Do not edit credentials, secrets, generated dependency folders, or build output.
+- Do not run git commands, deployment commands, or commands that change remote services.
+- Make minimal in-place edits. Do not delete an entire file, function, class, component, or resource.
+- If you notice an unrelated issue, report it in the summary and do not change it.'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${RUNNER_TEMP:-/tmp}/codex-review-fix"; mkdir -p "$WORK"
-PROMPT_FILE="$SCRIPT_DIR/prompts/review.md"           # shared across every profile — see README
+PROMPT_FILE="$SCRIPT_DIR/prompts/review.md"
 TEMPLATE_FILE="$SCRIPT_DIR/prompts/evidence-template.md"
 EVIDENCE="$WORK/evidence.md"; : > "$EVIDENCE"
 CLEANUP_NOTES="$WORK/cleanup-candidates.md"; : > "$CLEANUP_NOTES"
@@ -232,8 +86,6 @@ git config user.name "codex-autofix[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 # No new branch — already on $SRC_BRANCH from the workflow's checkout step.
 LOOP_START=$(git rev-parse HEAD)   # PR head, before any fix — for the final evidence diff
-
-profile_install
 
 FIX_COUNT=0
 STOP_REASON=""
@@ -256,12 +108,16 @@ codex_call() {
   local thread_var="$1" out_file="$2" prompt="$3"
   local current="${!thread_var}"
   local events="$WORK/_events-$((++CALL_N)).jsonl"
+  local status=0
   if [ -z "$current" ]; then
     "${CODEX[@]}" --json --output-last-message "$out_file" "$prompt" \
-      < /dev/null > "$events" 2>>"$WORK/codex.log" || true
+      < /dev/null > "$events" 2>>"$WORK/codex.log" || status=$?
   else
     "${CODEX[@]}" resume "$current" --json --output-last-message "$out_file" "$prompt" \
-      < /dev/null > "$events" 2>>"$WORK/codex.log" || true
+      < /dev/null > "$events" 2>>"$WORK/codex.log" || status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
+    echo "::error::Codex CLI failed (exit $status); see $WORK/codex.log" >&2
   fi
   local new_id
   new_id=$(grep -o '"thread_id":"[^"]*"' "$events" | head -1 | cut -d'"' -f4)
@@ -432,7 +288,15 @@ below, do NOT act on it — mention it in your summary instead so a human can
 decide.
 
 Rules:
-$(profile_fix_rules)
+$FIX_RULES
+
+Before finishing, read and use the target repository's
+`.agents/skills/repository-validation/SKILL.md`. Run every command it defines.
+If that skill provides an executable `scripts/setup.sh`, run it before the
+checks so dependencies and tools are available.
+If a command fails because of your implementation, make one smallest repair
+and rerun the required checks once. Do not claim success when a dependency or
+environment problem prevents validation; report the exact command and result.
 
 As your final message, list EVERY finding below with a one-line note on what
 you changed for it. If you noticed something else worth flagging that is NOT
@@ -447,105 +311,33 @@ $CURRENT_FINDINGS_TEXT"
   # gates below see the full picture (closes the stage/commit bypass).
   git reset -q --mixed "$ROUND_START"
 
-  # ---- GATE A: scope allowlist (revert everything outside the profile's scope) ----
-  # Back up in-scope changed files' actual content before reverting anything
-  # — not just their paths — so that if one unexpectedly disappears below,
-  # it can be actively restored, not just reported. The revert loop only
-  # ever acts on a path that fails in_scope, so in-scope files should
-  # already be structurally untouchable here; this backup is what makes that
-  # a guarantee rather than an assumption, covering the case where in_scope()
-  # or the porcelain-line parsing itself has a bug.
-  GATE_A_BACKUP="$WORK/gate-a-backup-$ROUND"
-  rm -rf "$GATE_A_BACKUP"; mkdir -p "$GATE_A_BACKUP"
-  # A file, not a space-accumulated variable: this list gets re-read below
-  # via `while read`, and a `for f in $VAR` re-split of an accumulated
-  # string is not reliable across every shell this might run under.
-  IN_SCOPE_LIST="$WORK/gate-a-inscope-$ROUND.txt"
-  : > "$IN_SCOPE_LIST"
-  while IFS= read -r line; do
-    f="${line:3}"; [ -z "$f" ] && continue
-    if in_scope "$f"; then
-      echo "$f" >> "$IN_SCOPE_LIST"
-      if [ -f "$f" ]; then
-        mkdir -p "$GATE_A_BACKUP/$(dirname "$f")"
-        cp -p "$f" "$GATE_A_BACKUP/$f" 2>/dev/null || true
-      fi
-    fi
-  done < <(git status --porcelain)
-
-  REVERTED_OOS=""
-  while IFS= read -r line; do
-    f="${line:3}"; [ -z "$f" ] && continue
-    if in_scope "$f"; then continue; fi
-    if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
-      git checkout -- "$f" 2>/dev/null && REVERTED_OOS="$REVERTED_OOS $f"   # tracked → revert (restores deletions too)
-    else
-      rm -rf -- "$f" 2>/dev/null && REVERTED_OOS="$REVERTED_OOS $f"         # untracked file/dir → remove
-    fi
-  done < <(git status --porcelain)
-  if [ -n "$REVERTED_OOS" ]; then
-    echo "::warning::Gate A reverted change(s) outside the profile's scope ($SCOPE_PREFIX):$REVERTED_OOS"
-    {
-      echo "### Round $ROUND — attempted changes outside the profile's scope ($SCOPE_PREFIX):$REVERTED_OOS"
-      echo "_Auto-reverted; only files under the profile's scope prefix may be modified. Codex's own summary for this round (may explain its reasoning — verify independently):_"
-      echo
-      cat "$WORK/fix-summary-$ROUND.md" 2>/dev/null || echo "_(no summary captured)_"
-      echo
-    } >> "$CLEANUP_NOTES"
-  fi
-
-  # Actively restore, don't just detect: every path from the snapshot above
-  # must still show as changed now. If one doesn't, Gate A (or in_scope())
-  # has a real bug — put the backed-up content back rather than letting a
-  # legitimate, in-scope fix vanish, and still say so loudly since this
-  # should never happen in the first place.
-  RESTORED_BY_GATE_A=""
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    if ! git status --porcelain -- "$f" | grep -q .; then
-      if [ -f "$GATE_A_BACKUP/$f" ]; then
-        mkdir -p "$(dirname "$f")"
-        cp -p "$GATE_A_BACKUP/$f" "$f" 2>/dev/null && RESTORED_BY_GATE_A="$RESTORED_BY_GATE_A $f"
-      fi
-    fi
-  done < "$IN_SCOPE_LIST"
-  if [ -n "$RESTORED_BY_GATE_A" ]; then
-    echo "::error::Gate A inconsistency: in-scope change(s) disappeared after the scope pass and were force-restored from backup — this should never happen; treat as a bug in in_scope() or Gate A:$RESTORED_BY_GATE_A"
-  fi
-  rm -rf "$GATE_A_BACKUP" "$IN_SCOPE_LIST"
-
-  # ---- GATE A2: finding-scoped restriction (within the profile's scope) ----
-  # Staying inside scope by PATH doesn't mean staying in scope: a real fix
-  # once wired brand-new hooks into main.py's request lifecycle — a file no
-  # finding cited, technically "in scope" by directory alone. Revert any
-  # EXISTING file in scope that isn't referenced by a file:line citation in
-  # the agreed findings. Brand-new files are exempt — a fix may legitimately
-  # need a new helper module, and a file that didn't exist before can never
-  # have been "cited" by anything.
-  CITED_FILES=$(grep -oE "\`${SCOPE_PREFIX}[^\`]*\`" <<< "$CURRENT_FINDINGS_TEXT" \
-    | tr -d '`' | sed -E 's/:[0-9]+$//' | sort -u)
+  # ---- GATE A: finding-scoped restriction ----
+  # No repository path convention is assumed. Every changed file, including a
+  # newly created file, must be named in a reviewer finding with file:line.
+  CITED_FILES=$(grep -oE '[A-Za-z0-9_.][A-Za-z0-9_./-]*:[0-9]+' <<< "$CURRENT_FINDINGS_TEXT" \
+    | sed -E 's/:[0-9]+$//' | sort -u)
   UNCITED=""
   while IFS= read -r line; do
     f="${line:3}"; [ -z "$f" ] && continue
-    if ! in_scope "$f"; then continue; fi   # already handled by Gate A above
-    if validation_only_file "$f"; then continue; fi
     grep -qxF "$f" <<< "$CITED_FILES" && continue
     if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
       git checkout -- "$f" 2>/dev/null && UNCITED="$UNCITED $f"
+    else
+      rm -rf -- "$f" 2>/dev/null && UNCITED="$UNCITED $f"
     fi
   done < <(git status --porcelain)
   if [ -n "$UNCITED" ]; then
-    echo "::warning::Reverted change(s) to file(s) not cited by any agreed finding:$UNCITED"
+    echo "::warning::Gate A reverted change(s) not cited by any agreed finding:$UNCITED"
     {
-      echo "### Round $ROUND — attempted changes outside the agreed findings:$UNCITED"
-      echo "_Auto-reverted; only files a finding actually cites may be modified. Codex's own summary for this round (may explain its reasoning — verify independently):_"
+      echo "### Round $ROUND — attempted changes not cited by agreed findings:$UNCITED"
+      echo "_Auto-reverted; every changed file must be cited by a finding. Codex's own summary follows:_"
       echo
       cat "$WORK/fix-summary-$ROUND.md" 2>/dev/null || echo "_(no summary captured)_"
       echo
     } >> "$CLEANUP_NOTES"
   fi
 
-  # Stage the surviving (in-scope) changes; evaluate the staged diff so added,
+  # Stage the surviving cited changes; evaluate the staged diff so added,
   # modified, and deleted files are all covered.
   git add -A
 
@@ -575,7 +367,7 @@ $CURRENT_FINDINGS_TEXT"
   fi
 
   if git diff --cached --quiet; then
-    STOP_REASON="review flagged issues but fix produced no in-scope change (round $ROUND)"
+    STOP_REASON="review flagged issues but fix produced no cited change (round $ROUND)"
     # Nothing survived to become a commit, so there's no diff to show — but
     # Codex's own final message for this round (what it attempted, or why it
     # didn't act) is still real signal. Without this, "no in-scope change"
@@ -599,34 +391,6 @@ $CURRENT_FINDINGS_TEXT"
   read -r ADD DEL < <(git diff --cached --numstat | awk '{a+=$1; d+=$2} END{print a+0, d+0}')
   if [ "$DEL" -gt "$DELETION_LINE_THRESHOLD" ] || { [ "$DEL" -ge 10 ] && [ "$DEL" -gt $((DELETION_RATIO * ADD)) ]; }; then
     HAS_DELETIONS=1
-  fi
-
-  # ---- GATE B: validate (compile/typecheck + tests) ----
-  if ! profile_validate; then
-    reset_round "$ROUND_START"; STOP_REASON="blocked: fix failed validation — $(profile_validate_label) (round $ROUND)"; break
-  fi
-
-  # Test files are permitted only as a validation aid. Remove them after the
-  # validation gate succeeds, while retaining the actual product fix.
-  VALIDATION_ONLY_FILES=""
-  while IFS= read -r line; do
-    f="${line:3}"; [ -z "$f" ] && continue
-    if ! validation_only_file "$f"; then continue; fi
-    VALIDATION_ONLY_FILES="$VALIDATION_ONLY_FILES $f"
-    if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
-      git checkout "$ROUND_START" -- "$f"
-    else
-      rm -rf -- "$f"
-    fi
-  done < <(git status --porcelain)
-  if [ -n "$VALIDATION_ONLY_FILES" ]; then
-    git add -A
-    echo "::notice::Discarded validation-only test changes before commit:$VALIDATION_ONLY_FILES"
-  fi
-
-  if git diff --cached --quiet; then
-    STOP_REASON="validation-only test changes discarded; no product change to commit (round $ROUND)"
-    break
   fi
 
   # ---- Commit the round ----
@@ -710,4 +474,4 @@ if [ "$FIX_COUNT" -gt 0 ]; then
   fi
 fi
 
-echo "Loop finished (profile: $PROFILE): $FIX_COUNT fix round(s); stop reason: $STOP_REASON"
+echo "Loop finished: $FIX_COUNT fix round(s); stop reason: $STOP_REASON"

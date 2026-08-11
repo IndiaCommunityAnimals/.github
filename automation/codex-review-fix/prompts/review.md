@@ -5,6 +5,11 @@ checked-out branch (the PR merge result) and write a concise review comment.
 
 ## What to look for
 
+For AWS questions, use the configured `aws-knowledge` MCP server first, then
+`aws-docs` if needed. For Terraform questions, use the configured Terraform
+MCP server first. Do not use generic web search for AWS or Terraform when
+those MCP servers are available; if unavailable, state that limitation.
+
 Focus on four things, in priority order:
 
 1. **Bugs** — correctness issues, edge cases, logic errors, null/undefined

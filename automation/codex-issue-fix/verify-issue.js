@@ -61,10 +61,11 @@ function isTrustedAssociation(association) {
   return TRUSTED_ASSOCIATIONS.has(association);
 }
 
-// Issue type is encoded in the title prefix. Labels are not needed to trigger
-// this workflow; trusted repository contributors run automatically.
-function automationLabelsForIssue(issue) {
-  return [];
+// Every implementation issue gets a visible request/approval state. The
+// caller decides when to invoke the workflow; the reusable workflow decides
+// whether the coding agent is allowed to run.
+function automationLabelsForIssue(issue, maintainer = isTrustedAssociation(issue.author_association)) {
+  return [maintainer ? 'codex-run-approved' : 'codex-run-requested'];
 }
 
 // Issue Forms enforce detailed fields in the UI; these checks protect API-made
