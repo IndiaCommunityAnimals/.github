@@ -258,7 +258,7 @@ The issue workflow itself declares:
 - concurrency group `codex-issue-fix-${{ github.repository }}-${{ github.event.issue.number }}`;
 - `cancel-in-progress: true`;
 - runner `ubuntu-24.04`; and
-- a 45-minute job timeout.
+- a 75-minute job timeout, allowing one bounded validation-repair turn.
 
 The caller normally needs to invoke the workflow for issue events such as:
 
@@ -828,7 +828,7 @@ In `implement` mode the controller requires `CODEX_AUTH_FILE` and
 restores mode `0600`. The prompt is the trusted prompt file followed by the
 issue snapshot inside `<github_issue>...</github_issue>`.
 
-Codex runs from the isolated worktree with:
+The initial Codex turn runs from the isolated worktree with:
 
 ```text
 codex exec
@@ -837,20 +837,21 @@ codex exec
   --ignore-user-config
   --ignore-rules
   --skip-git-repo-check
-  --ephemeral
+  --json
   --output-schema agent-output.schema.json
   --output-last-message agent-result.json
 ```
 
 `GH_TOKEN` and `GITHUB_TOKEN` are removed from the Codex environment. Standard
-output and error are written to `codex.log`. A nonzero Codex exit emits
+error is written to `codex.log`, while JSON events are captured separately so
+the controller can retain the thread ID. A nonzero Codex exit emits
 `Codex agent execution failed`. The controller rejects a result unless it has
 string `approach`, `validation.status` equal to `passed`, `failed`, or
 `blocked`, a non-empty validation command array, a string failure reason, an
 array of risks, and string documentation. A non-passed result must have a
 non-empty failure reason.
 
-After result validation, the controller:
+After initial result validation, the controller:
 
 - records all changed paths relative to the baseline, including added,
   copied, deleted, modified, renamed, type-changed, or unmerged paths;
@@ -860,16 +861,24 @@ After result validation, the controller:
 - creates a `Codex candidate change` commit in the isolated repository;
 - runs Gitleaks `git --redact --no-banner --no-color` over the baseline-to-
   candidate history;
-- copies the structured result into a separate result-scan directory and runs
-  Gitleaks `dir --redact --no-banner --no-color` over it;
+- when validation is not `passed`, copies and secret-scans the structured result
+  before including it as untrusted diagnostic data in one repair prompt;
+- resumes the same Codex thread for that single repair turn, or starts a fresh
+  sandboxed turn with the full trusted context if no thread ID was captured;
+- reapplies the protected-path and baseline-to-candidate secret scans after the
+  repair and accepts the repair turn's validation result as final;
+- copies the final structured result into a separate result-scan directory and
+  runs Gitleaks `dir --redact --no-banner --no-color` over it;
 - distinguishes a secret finding (scanner exit 1) from a scanner failure;
 - marks the result safe only after both scans pass;
-- rejects `failed` or `blocked` repository validation results; and
+- opens a draft PR with the unresolved evidence when validation remains
+  `failed` or `blocked` after the one repair turn; and
 - writes a binary patch from baseline to candidate and rejects an empty patch.
 
-The successful controller output is `patch_ready=true` with reason
-`Candidate changes passed the common safety gates`. No branch or PR is
-published before this output is present.
+The controller emits `patch_ready=true` after path and secret gates pass. Its
+reason records either successful validation or the retained `failed`/`blocked`
+status after the bounded repair turn. No branch or PR is published before this
+output is present.
 
 ### 15.4 Issue workflow tool and cleanup details
 
@@ -1052,9 +1061,10 @@ environment limitation or pre-existing problem prevents validation.
 The issue controller does not reject a `blocked` status. It requires the
 structured result, protects the changed paths, secret-scans both the candidate
 history and the report, and then emits `patch_ready=true`. The workflow creates
-the PR when `patch_ready=true`, so the PR body can contain a blocked validation
-status rather than no PR. The PR body renders every reported command/result,
-the status, and the failure reason.
+a draft PR when `patch_ready=true` but validation is not `passed`, so the PR
+body can contain a blocked validation status rather than losing the candidate.
+The PR body renders every reported command/result, the status, and the failure
+reason.
 
 For Terraform, `terraform init -backend=false` disables backend/state access;
 it does not eliminate provider installation. If the required provider is not
@@ -1065,11 +1075,12 @@ environment/tooling failure. The current output therefore shows one formatting
 success followed by dependent/provider and plugin initialization failures; it
 does not show that the Terraform change itself caused a syntax failure.
 
-The repository validation skill should make this distinction explicit: cache or
-mirror providers and TFLint plugins, run validation where the required network
-is available, and have Codex report environment-blocked checks honestly. A
-stricter deployment policy can additionally reject PR creation unless Codex
-reports validation as `passed`; that is not the current issue workflow behavior.
+The repository validation skill makes this distinction explicit and requires
+Codex to report environment-blocked checks honestly. Terraform repositories
+also provide a `$terraform` implementation skill, which Codex uses to generate,
+run, and repair the appropriate commands itself. A blocked result remains
+visible evidence in a draft PR; it is not treated as permission to merge or
+deploy.
 
 ## 16. Definition of done
 

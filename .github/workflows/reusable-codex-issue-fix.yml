@@ -61,7 +61,9 @@ jobs:
   verify-and-fix:
     # Pin the runner image; repository skills own any stack-specific tooling.
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Leave room for one bounded validation-repair turn after the initial
+    # implementation without allowing an unbounded agent loop.
+    timeout-minutes: 75
     env:
       APPROVAL_LABEL: ${{ inputs.approval_label }}
       REQUEST_LABEL: ${{ inputs.request_label }}
@@ -635,7 +637,9 @@ jobs:
               repo: context.repo.repo,
               head: process.env.FIX_BRANCH,
               base: process.env.TARGET_BRANCH,
-              draft: false,
+              // Keep validation evidence advisory for PR creation: unresolved
+              // checks produce a draft instead of discarding reviewable work.
+              draft: result.validation.status !== 'passed',
               title: `fix: ${cleanTitle}`,
               body: `## Problem
 
@@ -723,6 +727,20 @@ jobs:
                   const validation = result?.validation;
                   if (validation && ['passed', 'failed', 'blocked'].includes(validation.status)) {
                     details = `\n\nValidation status: **${validation.status}**`;
+                    if (Array.isArray(validation.commands) && validation.commands.length > 0) {
+                      const commandLines = validation.commands.map((entry) => {
+                        const command = String(entry.command || 'unknown command')
+                          .replace(/`/g, '\\`');
+                        const result = String(entry.result || 'unknown');
+                        const commandDetails = String(entry.details || '')
+                          .replace(/\s+/g, ' ')
+                          .trim()
+                          .slice(0, 500);
+                        return `- \`${command}\` — **${result}**` +
+                          (commandDetails ? `: ${commandDetails}` : '');
+                      }).join('\n');
+                      details += `\n\nValidation checks:\n${commandLines}`;
+                    }
                     if (validation.status !== 'passed') {
                       details += `\n\nReason: ${validation.failure_reason ||
                         'The repository validation did not pass.'}`;
