@@ -97,22 +97,33 @@ prepare_repository() {
 implement_issue() {
   : "${CODEX_AUTH_FILE:?}"
   local secret_scanner="${SECRET_SCANNER:?}"
-  local -a codex_mcp_config=(
-    --config 'mcp_servers.aws-knowledge.url="https://knowledge-mcp.global.api.aws"'
-    --config 'mcp_servers.aws-knowledge.enabled=true'
-  )
-  if command -v uvx >/dev/null 2>&1; then
-    codex_mcp_config+=(
-      --config 'mcp_servers.aws-docs.command="uvx"'
-      --config 'mcp_servers.aws-docs.args=["awslabs.aws-documentation-mcp-server@latest"]'
-      --config 'mcp_servers.aws-docs.enabled=true'
+  # Keep this array non-empty so expansion remains safe under `set -u` on
+  # older Bash versions as well as the GitHub-hosted runner.
+  local -a codex_config=(--config 'approval_policy="never"')
+  if [ "${ENABLE_AWS_MCP:-false}" = "true" ]; then
+    codex_config+=(
+      --config 'mcp_servers.aws-knowledge.url="https://knowledge-mcp.global.api.aws"'
+      --config 'mcp_servers.aws-knowledge.enabled=true'
+      --config 'mcp_servers.aws-knowledge.required=true'
     )
   fi
-  if [ -n "${TERRAFORM_MCP_SERVER:-}" ] && [ -x "$TERRAFORM_MCP_SERVER" ]; then
-    codex_mcp_config+=(
-      --config "mcp_servers.terraform.command=\"$TERRAFORM_MCP_SERVER\""
-      --config 'mcp_servers.terraform.args=["stdio"]'
+
+  if [ "${ENABLE_TERRAFORM_MCP:-false}" = "true" ]; then
+    local terraform_mcp_image="${TERRAFORM_MCP_IMAGE:?}"
+    if ! command -v docker >/dev/null 2>&1; then
+      write_outputs false "Terraform MCP was enabled, but Docker is unavailable" patch_ready
+      return
+    fi
+    if ! docker image inspect "$terraform_mcp_image" >/dev/null 2>&1; then
+      write_outputs false \
+        "Terraform MCP was enabled, but its pinned image is unavailable" patch_ready
+      return
+    fi
+    codex_config+=(
+      --config 'mcp_servers.terraform.command="docker"'
+      --config "mcp_servers.terraform.args=[\"run\",\"--interactive\",\"--rm\",\"${terraform_mcp_image}\",\"--toolsets=registry\"]"
       --config 'mcp_servers.terraform.enabled=true'
+      --config 'mcp_servers.terraform.required=true'
     )
   fi
   local baseline
@@ -140,10 +151,10 @@ $(cat "$ISSUE_FILE")
     cd "$AGENT_WORK"
     env -u GH_TOKEN -u GITHUB_TOKEN codex exec \
       --sandbox workspace-write \
-      --config 'approval_policy="never"' \
-      "${codex_mcp_config[@]}" \
+      "${codex_config[@]}" \
       --ignore-user-config \
       --ignore-rules \
+      --strict-config \
       --skip-git-repo-check \
       --ephemeral \
       --output-schema "$OUTPUT_SCHEMA" \
@@ -232,6 +243,15 @@ $(cat "$ISSUE_FILE")
   fi
   : > "$SAFE_RESULT_MARKER"
   chmod 600 "$SAFE_RESULT_MARKER"
+
+  local validation_status
+  validation_status="$(jq -r '.validation.status' "$AGENT_RESULT")"
+  if [ "$validation_status" != "passed" ]; then
+    write_outputs false \
+      "Repository validation did not pass (status: ${validation_status})" \
+      patch_ready
+    return
+  fi
 
   git -C "$AGENT_WORK" diff --binary "$baseline" "$candidate" > "$PATCH_FILE"
   if [ ! -s "$PATCH_FILE" ]; then
