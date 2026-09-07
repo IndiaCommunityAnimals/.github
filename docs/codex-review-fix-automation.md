@@ -35,49 +35,25 @@ The infrastructure, frontend, and backend repositories each own one small
 to the repository where the PR is opened, so the organization repository
 cannot replace those callers.
 
-## Shared prompt, not independent per-profile
+## Shared prompt and repository validation
 
-Unlike `codex-issue-fix`'s `base.md` + one profile prompt per stack, the
-review prompt (`prompts/review.md`) is a **single file shared by every
-profile**, not split. Its content — bugs, security, code quality, test
-coverage presence, severity tagging, output format — is already
-stack-agnostic; splitting it would only recreate the "two nearly-identical
-copies kept in sync by hand" problem this consolidation exists to remove. The
-same is true of `prompts/evidence-template.md`.
+The review prompt (`prompts/review.md`) and evidence template are shared and
+stack-agnostic. The loop no longer assumes a backend, frontend, Terraform,
+directory, provider, runtime, package manager, or test framework.
 
-What genuinely differs per stack lives in `run-loop.sh` itself, selected by
-`PROFILE` at the top of the script — mirroring how
-`automation/codex-issue-fix/run-agent.sh` switches `is_allowed_path()` and
-`validate_agent_work()` on `PROFILE`:
+The repository owns validation through `.agents/skills/repository-validation/SKILL.md`.
+The Codex fixer reads that skill, runs its setup and every required command,
+and makes one repair attempt for implementation-caused failures. The shared
+controller does not assume a language, directory, provider, runtime, package
+manager, or validation command. It records Codex's reported commands and
+results in the evidence comment; repository CI remains authoritative for merge.
+Terraform scripts should use `TF_PLUGIN_CACHE_DIR` or a provider mirror; TFLint
+scripts should pin and initialize plugins separately and retain their logs.
 
-- the in-scope path prefix (and, for frontend, its test-file exclusion)
-- the dependency install step
-- the Gate B validation command
-- the fix prompt's "Rules:" bullets (wording differs enough — "function/class"
-  vs. "function/component", a TypeScript-specific strictness note — that this
-  is prose per profile, not a templated string)
-
-Adding a new stack means adding a case to `run-loop.sh` deliberately, not
-passing an arbitrary caller-supplied path or command as a workflow input.
-
-### Temporary infrastructure tests
-
-Infrastructure test files may be created or edited temporarily when they are
-needed to validate an agreed product fix. This includes `test.hcl`,
-`*.test.hcl`, `*.tftest.hcl`, and files under `test/` or `tests/`. Gate B runs
-with those changes present, then the controller restores tracked test files to
-the round's starting commit and removes newly created test files before
-staging and committing. Test changes can therefore support validation, but
-never appear in an automatic-fix commit. Test-coverage findings remain
-advisory and are not a reason to weaken or delete a test.
-
-## Profiles and validation
-
-| Profile | Repository stack | Scope prefix | Gate B validation |
-|---|---|---|---|
-| `backend` | Python 3.12 | `api/app/` | `python -m compileall` + `pytest -m no_db` |
-| `frontend` | TypeScript, Vite | `src/` (excl. `*.test.ts(x)`/`*.spec.ts(x)`) | `tsc --noEmit` + `npm run test` |
-| `infrastructure` | Terraform | `infra/` | `terraform fmt` + backend-free `terraform validate` + `tflint` |
+The fixer may modify any repository path only when the path is cited by an
+agreed finding using `file:line`. There is no profile path prefix. New files
+are subject to the same citation rule as existing files. Whole-file deletion
+remains prohibited automatically.
 
 ## Trigger and approval
 
@@ -108,7 +84,7 @@ For each caller repository:
 3. Grant the App credential secrets used by the caller (`CLIENT_ID` and
    `PRIVATE_KEY`). The App must be installed on the target
    repository with `Contents: write` and `Pull requests: write` permissions.
-4. Keep the caller workflow on the repository default branch.
+5. Keep the caller workflow on the repository default branch.
 
 ## Merge and rollout order
 
@@ -116,11 +92,10 @@ For each caller repository:
 2. Merge one caller (e.g. backend) and test against a real PR with a
    deliberately introduced, findable issue.
 3. After the pilot succeeds, add the caller to the remaining repository.
-4. Tag a reviewed central release and update callers from `@main` to that tag
-   or an immutable commit SHA.
+4. Tag a reviewed central release and update callers to that tag or an
+   immutable commit SHA.
 
-The initial `@main` reference supports the pilot. A release tag or SHA
-prevents an unreviewed central change from immediately affecting all callers.
+Callers should not use a mutable central branch for long-term operation.
 
 ## A note on execution model
 
@@ -132,8 +107,8 @@ never holds push credentials or touches the real checkout.
 
 `codex-review-fix` does not do this. It runs Codex with its configured
 workspace-write sandbox directly against the
-authenticated checkout, relying entirely on post-hoc gates (Gate A/A2, the
-whole-file-deletion guard, Gate B) to catch anything out of line, rather than
+authenticated checkout, relying on post-hoc scope and deletion guards plus
+Codex's validation evidence rather than
 never letting Codex touch the real tree in the first place. This was a
 deliberate, tested design from when the loop lived standalone in each
 repository, driven by the negotiation architecture needing Codex to actually
@@ -147,12 +122,13 @@ just because the two automations now share a repository.
 
 - No review output (stale token or CLI failure): job fails loudly
   (`::error::`), never silently treated as "clean."
-- Gate A / Gate A2 reverts an out-of-scope or uncited change: logged as a
+- Gate A reverts a change to a file that no agreed finding cites: logged as a
   `::warning::` and captured in the PR comment's cleanup-candidates section;
-  the round continues with the remaining in-scope changes.
+  the round continues with the remaining cited changes.
 - Whole-file deletion attempted: reverted, logged, and captured for a human
   to evaluate — never silently dropped.
-- Gate B validation fails: the entire round is reverted; nothing is committed.
+- Codex reports a validation failure: the exact command and result are kept in
+  the evidence comment; repository CI remains authoritative for merge.
 - Push rejected (branch moved during the run): job fails loudly; fixes were
   validated locally but not pushed.
 - Success: one or more commits on the PR's own branch, one PR comment with

@@ -7,11 +7,11 @@ name: Reusable Codex Review-Fix Loop
 on:
   workflow_call:
     inputs:
-      # Profiles select the scope prefix, install step, Gate B validation
-      # command, and stack-specific fix-prompt rules — see run-loop.sh.
+      # Kept for caller compatibility; repository validation owns paths and commands.
       profile:
-        description: backend, frontend, or infrastructure
-        required: true
+        description: Optional caller metadata; not used to select paths or commands
+        required: false
+        default: ""
         type: string
       # Keep script checkout aligned with the reusable workflow reference.
       automation_ref:
@@ -43,16 +43,6 @@ on:
         description: Pinned @openai/codex npm version
         required: false
         default: "0.145.0"
-        type: string
-      python_version:
-        description: Used when profile is backend
-        required: false
-        default: "3.12"
-        type: string
-      node_version:
-        description: Used when profile is frontend
-        required: false
-        default: "20"
         type: string
     secrets:
       # Pass only the credentials needed by this workflow; do not inherit
@@ -91,7 +81,6 @@ jobs:
     # a single-call job.
     timeout-minutes: 90
     env:
-      PROFILE: ${{ inputs.profile }}
       SRC_BRANCH: ${{ github.head_ref }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       MAX_FIX_ROUNDS: ${{ inputs.max_fix_rounds }}
@@ -152,16 +141,6 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-python@v6
-        if: steps.trigger-guard.outputs.skip != 'true' && inputs.profile == 'backend'
-        with:
-          python-version: ${{ inputs.python_version }}
-
-      - uses: actions/setup-node@v6
-        if: steps.trigger-guard.outputs.skip != 'true' && inputs.profile == 'frontend'
-        with:
-          node-version: ${{ inputs.node_version }}
-
       # GitHub-hosted Ubuntu can restrict the user namespaces Bubblewrap needs
       # for Codex's --sandbox workspace-write mode to actually set up (without
       # this, the CLI fails before touching any file — e.g. "bwrap: loopback:
@@ -182,17 +161,6 @@ jobs:
               >> "$GITHUB_OUTPUT"
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-
-      - uses: hashicorp/setup-terraform@v4
-        if: steps.trigger-guard.outputs.skip != 'true' && inputs.profile == 'infrastructure'
-        with:
-          terraform_version: "1.11.0"
-          terraform_wrapper: false
-
-      - uses: terraform-linters/setup-tflint@v4.1.0
-        if: steps.trigger-guard.outputs.skip != 'true' && inputs.profile == 'infrastructure'
-        with:
-          tflint_version: v0.59.1
 
       # CODEX_AUTH_JSON holds the raw contents of ~/.codex/auth.json (plain
       # JSON, not base64 — it's passed through env:, not interpolated into a

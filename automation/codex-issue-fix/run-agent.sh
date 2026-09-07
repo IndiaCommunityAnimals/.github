@@ -97,6 +97,24 @@ prepare_repository() {
 implement_issue() {
   : "${CODEX_AUTH_FILE:?}"
   local secret_scanner="${SECRET_SCANNER:?}"
+  local -a codex_mcp_config=(
+    --config 'mcp_servers.aws-knowledge.url="https://knowledge-mcp.global.api.aws"'
+    --config 'mcp_servers.aws-knowledge.enabled=true'
+  )
+  if command -v uvx >/dev/null 2>&1; then
+    codex_mcp_config+=(
+      --config 'mcp_servers.aws-docs.command="uvx"'
+      --config 'mcp_servers.aws-docs.args=["awslabs.aws-documentation-mcp-server@latest"]'
+      --config 'mcp_servers.aws-docs.enabled=true'
+    )
+  fi
+  if [ -n "${TERRAFORM_MCP_SERVER:-}" ] && [ -x "$TERRAFORM_MCP_SERVER" ]; then
+    codex_mcp_config+=(
+      --config "mcp_servers.terraform.command=\"$TERRAFORM_MCP_SERVER\""
+      --config 'mcp_servers.terraform.args=["stdio"]'
+      --config 'mcp_servers.terraform.enabled=true'
+    )
+  fi
   local baseline
   baseline="$(cat "$BASELINE_FILE")"
 
@@ -123,6 +141,7 @@ $(cat "$ISSUE_FILE")
     env -u GH_TOKEN -u GITHUB_TOKEN codex exec \
       --sandbox workspace-write \
       --config 'approval_policy="never"' \
+      "${codex_mcp_config[@]}" \
       --ignore-user-config \
       --ignore-rules \
       --skip-git-repo-check \

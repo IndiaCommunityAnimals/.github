@@ -45,10 +45,15 @@ The three implementation forms contain a required **Target branch** field,
 which must name an existing branch in that repository. The selected branch is
 checked out as the implementation baseline and becomes the generated pull
 request's base. The field starts the caller workflow even when the repository
-does not have the automation labels yet. The shared workflow creates any missing
-the optional `codex-fix-approved` label in the caller repository. No request
-label is required; trusted repository contributors run automatically after
-validation.
+does not have the automation labels yet. The shared workflow creates the
+`codex-run-requested` and `codex-run-approved` labels when needed. A contributor
+gets `codex-run-requested`; a maintainer-authored issue gets
+`codex-run-approved` automatically.
+
+Editing a contributor issue removes its previous approval and returns it to the
+request state. Removing an approval label also reruns verification and cannot
+start the agent. Issue runs use `cancel-in-progress: true`, so newer edits or
+label changes supersede older runs.
 
 All forms require a safety confirmation that secrets, credentials, tokens, and
 sensitive personal data were removed. Supporting evidence, dependencies,
@@ -147,16 +152,16 @@ automation. In a repository with a caller workflow, each valid issue requests
 one Codex implementation PR. The **General issue or discussion** form is
 ignored by the caller because it does not contain a target-branch field.
 
-Labels are metadata, not the trigger. Caller workflows start on an implementation
-issue's target-branch field. The reusable workflow provisions only the
-`codex-fix-approved` label, which is needed for external-contributor approval;
-trusted repository contributors do not need a label. This avoids GitHub's
-behavior of silently omitting Issue Form labels that do not already exist in the
-repository.
+Labels are both visible state and the authorization gate. Caller workflows start
+on implementation issue events, but the coding job proceeds only when
+`codex-run-approved` exists. Contributors initially receive
+`codex-run-requested`; a repository maintainer must review the issue and add
+`codex-run-approved`. Maintainer-authored issues receive the approval label
+automatically. Verification also checks the label event history so a contributor
+cannot self-approve by adding the label or editing an old issue.
 
-Owners, organization members, and collaborators can proceed after validation.
-An external contributor requires a maintainer to add `codex-fix-approved`.
-Adding that label triggers a new verification run.
+Generated PRs and issue result comments include the issue author, approving
+maintainer, triggering actor, and GitHub Actions run ID for auditability.
 
 ## Required settings
 
@@ -192,11 +197,10 @@ the Codex process.
 5. Merge the infrastructure caller and test a small repository-local issue
    using one of the three organization forms.
 6. After the infrastructure pilot succeeds, add callers to frontend and backend.
-7. Tag a reviewed central release and update callers from `@main` to that tag or
-   an immutable commit SHA.
+7. Tag a reviewed central release and update callers to that tag or an
+   immutable commit SHA.
 
-The initial `@main` reference supports the pilot. A release tag or SHA prevents
-an unreviewed central change from immediately affecting all callers.
+Callers should not use a mutable central branch for long-term operation.
 
 ## Failure behavior
 

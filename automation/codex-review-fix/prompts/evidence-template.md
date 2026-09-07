@@ -6,7 +6,7 @@ states which source PR/branch this is for, how many rounds ran, and why it
 stopped — do NOT duplicate those here (Codex generating this has no access to
 them); only describe what's actually present in the diff.
 -->
-**Validation:** {{VALIDATION_SUMMARY}}  <!-- e.g. ✅ Gate B validation passed · Gate A ✅ (no deletions, in-scope) -->
+**Validation:** {{VALIDATION_SUMMARY}}  <!-- Codex-reported repository skill commands and results -->
 
 ---
 
