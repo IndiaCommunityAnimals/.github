@@ -20,12 +20,16 @@ Shared rules:
   services, cloud resources, databases, or repository settings.
 - Add or update tests when behavior changes and the repository has a relevant
   test pattern.
+- Discover and explicitly use every applicable technology skill supplied by the
+  target repository before editing. For Terraform files, use the repository's
+  `$terraform` skill for implementation and troubleshooting guidance.
 - Before finishing, explicitly use the target repository's
   `$repository-validation` skill and run every required check it defines. If a
-  setup script or dependency installation is provided by that skill, run it
-  before the checks and use the repository's documented lockfiles, caches, or
-  mirrors. Never claim validation passed when setup or dependency installation
-  failed. If a check fails because of the implementation, make one repair attempt and rerun
+  setup script is provided, the trusted controller has already run it before
+  this turn; do not run it again inside the network-restricted sandbox. Use the
+  prepared tools and the repository's documented lockfiles, caches, or mirrors.
+  Never claim validation passed when dependency initialization failed. If a
+  check fails because of the implementation, make one repair attempt and rerun
   the required checks exactly once. Do not begin a second repair cycle. If the
   rerun still fails, or an environment limitation or pre-existing problem
   prevents a pass, keep the implementation changes and report the exact failing

@@ -101,10 +101,20 @@ agent attempt even when validation fails.
 
 Codex discovers this tracked repository skill from the isolated worktree. The
 trusted base prompt explicitly invokes `$repository-validation`, so Codex runs
-the repository's checks, repairs implementation-caused failures, and reruns the
-checks before ending its single turn. If an environment limitation or existing
-repository problem prevents a pass, Codex must report the exact command, error,
-and reason in its structured result; that result is rendered in the pull request.
+the repository's checks and may repair implementation-caused failures within
+its initial turn. If that turn still reports `failed` or `blocked`, the common
+controller secret-scans the structured validation result and sends it back to
+the same Codex thread for one bounded repair turn. The repair turn works in the
+same isolated worktree, reruns the checks, and supplies the final validation
+result. If the thread ID is unavailable, the controller starts one fresh repair
+turn with the original trusted context and the same validation feedback.
+
+If an environment limitation or existing repository problem still prevents a
+pass after the repair turn, Codex must report the exact command, error, and
+reason. The controller preserves the candidate and opens a **draft pull
+request** instead of discarding reviewable work. The issue result comment and
+draft PR include the command-level outcomes; validation must pass before the PR
+is promoted for merge.
 The common controller protects `.agents/*`, preventing an implementation from
 editing or weakening its own validation instructions. Automation stops before
 Codex execution when the required skill file is missing.
