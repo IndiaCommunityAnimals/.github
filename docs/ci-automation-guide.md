@@ -14,6 +14,10 @@ human review. It documents both pipelines:
 Neither pipeline merges PRs, approves PRs, deploys infrastructure, runs
 Terraform apply/destroy, migrates production data, or replaces human review.
 
+To reproduce this system in a different GitHub organization, follow the
+[organization-wide bootstrap runbook](organization-codex-ci-bootstrap.md) for
+GitHub App registration, credentials, central files, callers, and rollout.
+
 ## 1. Repository layout and ownership
 
 The organization `.github` repository owns shared policy and reusable logic:
@@ -242,6 +246,8 @@ The reusable workflow accepts:
 | `automation_ref` | No | `main` | Ref used to check out this organization repository. |
 | `approval_label` | No | `codex-run-approved` | Maintainer-only label required to run Codex. |
 | `request_label` | No | `codex-run-requested` | Label automatically added while approval is pending. |
+| `enable_aws_mcp` | No | `false` | Enables the required AWS Knowledge MCP server. |
+| `enable_terraform_mcp` | No | `false` | Enables the required, registry-only Terraform MCP container. |
 | `CODEX_AUTH_JSON` | Yes | — | Codex authentication secret. |
 | `CLIENT_ID` | Yes | — | GitHub App client ID. |
 | `PRIVATE_KEY` | Yes | — | GitHub App private key. |
@@ -270,9 +276,10 @@ expected payload and is not present in the checked-in organization workflow.
 approval unlock a contributor issue. The job condition requires a Target branch
 heading and, for label events, specifically requires `codex-run-approved`.
 
-The caller passes `automation_ref`, the approval-label name, and the three
-secrets to `reusable-codex-issue-fix.yml`. It does not contain implementation
-logic; this keeps all repositories on the same centrally reviewed behavior.
+The caller passes `automation_ref`, the label names, any repository-appropriate
+MCP opt-ins, and the three secrets to `reusable-codex-issue-fix.yml`. It does
+not contain implementation logic; this keeps all repositories on the same
+centrally reviewed behavior.
 
 ## 5. Issue workflow: every execution step
 
@@ -462,11 +469,11 @@ The shared workflow does not contain a repository validation script or assume
 any directory, language, provider, runtime, or package manager. Repository CI
 remains the authoritative merge gate.
 
-The controllers pass the AWS Knowledge MCP configuration directly to Codex,
-even when user configuration is ignored. The AWS documentation MCP is added
-when `uvx` is available. A Terraform MCP server is added only when the caller
-sets `TERRAFORM_MCP_SERVER` to an executable path; no developer-machine path
-is embedded in the shared automation.
+The issue controller enables MCP servers only when the caller opts in. AWS uses
+the managed AWS Knowledge endpoint. Terraform uses the official registry-only
+Terraform MCP container, pinned by version and manifest digest, with no host
+mounts or Terraform credentials. Enabled servers are required, so startup
+failure stops the Codex run rather than silently continuing without them.
 
 The reusable review workflow declares `contents: write` and
 `pull-requests: write`, uses concurrency group
@@ -856,7 +863,8 @@ After result validation, the controller:
 - copies the structured result into a separate result-scan directory and runs
   Gitleaks `dir --redact --no-banner --no-color` over it;
 - distinguishes a secret finding (scanner exit 1) from a scanner failure;
-- marks the result safe only after both scans pass; and
+- marks the result safe only after both scans pass;
+- rejects `failed` or `blocked` repository validation results; and
 - writes a binary patch from baseline to candidate and rejects an empty patch.
 
 The successful controller output is `patch_ready=true` with reason
@@ -871,8 +879,10 @@ the controller and schema into runner scratch storage, and checks out the
 verified target branch into `target-repository` with `fetch-depth: 1` and
 `persist-credentials: false`.
 
-It installs `@openai/codex@0.146.0` and downloads Gitleaks `v8.30.1` for
-Linux x64. The archive is checked against SHA-256
+It installs `@openai/codex@0.150.0`. When Terraform MCP is enabled, it pulls the
+official `hashicorp/terraform-mcp-server:1.2.0` image pinned to its immutable
+manifest digest before Codex authentication is restored. It also downloads
+Gitleaks `v8.30.1` for Linux x64. The archive is checked against SHA-256
 `551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb` before the
 binary is extracted and made mode `0700`.
 

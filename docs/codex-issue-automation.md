@@ -162,6 +162,9 @@ cannot self-approve by adding the label or editing an old issue.
 
 Generated PRs and issue result comments include the issue author, approving
 maintainer, triggering actor, and GitHub Actions run ID for auditability.
+Completed runs receive `codex-run-completed`; eligible runs that do not publish
+a PR receive `codex-run-failed`. The workflow removes the opposite result label
+so retries cannot leave both states on one issue.
 
 ## Required settings
 
@@ -175,6 +178,8 @@ For each caller repository:
 6. Grant the caller `CLIENT_ID` and `PRIVATE_KEY` Actions secrets for the
    GitHub App credentials.
 7. Keep the caller workflow on the repository default branch.
+8. Set `enable_aws_mcp` and `enable_terraform_mcp` only for repositories that
+   need those documentation tools.
 
 The caller passes `CODEX_AUTH_JSON`, `CLIENT_ID`, and `PRIVATE_KEY` explicitly.
 It does not use `secrets: inherit`, so unrelated organization or repository
@@ -211,9 +216,9 @@ Callers should not use a mutable central branch for long-term operation.
 - Validation skill missing: no Codex run, branch, or PR.
 - Skill validation fails because of the implementation: Codex fixes the change
   and reruns the skill checks within its turn.
-- Validation cannot pass because of an environment or pre-existing problem:
-  Codex reports the exact command and reason; the normal PR exposes that
-  evidence for repository CI and human review.
+- Validation cannot pass because of an implementation, environment, or
+  pre-existing problem: Codex reports the exact command and reason, but the
+  controller blocks branch and PR publication.
 - Secret scan finding in candidate code or the agent report: no branch or PR.
 - PR creation forbidden by settings: branch may exist, job reports the GitHub API failure.
 - Agent produces an accepted patch: one commit on `codex/issue-N`, one normal

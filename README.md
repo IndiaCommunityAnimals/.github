@@ -49,3 +49,7 @@ blocks branch publication entirely.
 
 See [Codex issue automation](docs/codex-issue-automation.md) for issue-form
 fields, triggering rules, settings, security boundaries, and rollout guidance.
+See [Organization-wide Codex CI bootstrap](docs/organization-codex-ci-bootstrap.md)
+for the complete procedure to reproduce the automation in another organization,
+including GitHub App registration, secrets, Codex authentication, callers,
+and rollout.

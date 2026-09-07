@@ -22,6 +22,19 @@ on:
         required: false
         default: codex-run-requested
         type: string
+      # ADDED: per-caller opt-in switches for the optional MCP servers.
+      # MCP servers run outside the Codex sandbox and hold network access, so
+      # each repository's caller explicitly enables only what it needs.
+      enable_aws_mcp:
+        description: Enable the AWS Knowledge MCP server for this run
+        required: false
+        default: false
+        type: boolean
+      enable_terraform_mcp:
+        description: Enable the Terraform MCP server for this run
+        required: false
+        default: false
+        type: boolean
     secrets:
       # Pass only Codex authentication; do not inherit unrelated organization
       # secrets.
@@ -52,10 +65,46 @@ jobs:
     env:
       APPROVAL_LABEL: ${{ inputs.approval_label }}
       REQUEST_LABEL: ${{ inputs.request_label }}
+      # ADDED: result labels so maintainers can filter automated issues.
+      COMPLETED_LABEL: codex-run-completed
+      FAILED_LABEL: codex-run-failed
       ISSUE_NUMBER: ${{ github.event.issue.number }}
       FIX_BRANCH: codex/issue-${{ github.event.issue.number }}
+      # ADDED: optional agent switches. MCP servers are disabled by default and
+      # only turn on when a caller opts in via the inputs above.
+      ENABLE_AWS_MCP: ${{ inputs.enable_aws_mcp }}
+      ENABLE_TERRAFORM_MCP: ${{ inputs.enable_terraform_mcp }}
+      # Pin the official Terraform MCP image by both version and immutable
+      # manifest digest. The container receives no host mounts or credentials.
+      TERRAFORM_MCP_IMAGE: hashicorp/terraform-mcp-server:1.2.0@sha256:bd095e2b442a2cb61255fe4db52f9e824f35d307a2044784c95d37a93f18d324
 
     steps:
+      # ADDED: fail fast with a clear message instead of a cryptic agent or
+      # token error several minutes into the run.
+      - name: Validate required secrets
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+        run: |
+          status=0
+          if [ -z "$CODEX_AUTH_JSON" ]; then
+            echo "::error::CODEX_AUTH_JSON is empty or not configured"
+            status=1
+          elif ! printf '%s' "$CODEX_AUTH_JSON" | jq -e . >/dev/null 2>&1; then
+            echo "::error::CODEX_AUTH_JSON is not valid JSON"
+            status=1
+          fi
+          if [ -z "$CLIENT_ID" ]; then
+            echo "::error::CLIENT_ID is empty or not configured"
+            status=1
+          fi
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "::error::PRIVATE_KEY is empty or not configured"
+            status=1
+          fi
+          exit "$status"
+
       # Central control files are loaded from the requested reviewed automation ref,
       # never from the issue-selected target branch.
       - name: Check out trusted organization automation
@@ -79,6 +128,12 @@ jobs:
               automationLabelsForIssue
             } = require(process.env.VERIFIER_PATH);
 
+            // FIX: the previous version referenced an undefined `labels` variable
+            // here, which crashed whenever a contributor edited an approved issue.
+            const currentLabels = (context.payload.issue.labels || []).map((label) =>
+              typeof label === 'string' ? label : label.name
+            );
+
             const definitions = {
               [process.env.APPROVAL_LABEL]: {
                 color: '1d76db',
@@ -87,6 +142,15 @@ jobs:
               [process.env.REQUEST_LABEL]: {
                 color: 'fbca04',
                 description: 'Issue requested Codex automation and awaits maintainer approval'
+              },
+              // ADDED: result labels provisioned alongside the workflow labels.
+              [process.env.COMPLETED_LABEL]: {
+                color: '0e8a16',
+                description: 'Codex automation produced a pull request for this issue'
+              },
+              [process.env.FAILED_LABEL]: {
+                color: 'd93f0f',
+                description: 'Codex automation ran but did not produce a pull request'
               }
             };
 
@@ -131,8 +195,9 @@ jobs:
 
             // Editing a contributor issue invalidates its previous approval.
             // The maintainer must review the changed request again.
+            // FIX: use currentLabels instead of the previously undefined `labels`.
             if (context.payload.action === 'edited' && !maintainer &&
-                labels.includes(process.env.APPROVAL_LABEL)) {
+                currentLabels.includes(process.env.APPROVAL_LABEL)) {
               await github.rest.issues.removeLabel({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -183,6 +248,16 @@ jobs:
             const problems = [...validation.problems];
             let approvalActor = '';
 
+            // ADDED: defense in depth on top of the caller-side guard. Issues
+            // events also fire for pull requests, and closed issues must not be
+            // processed even if something labels them.
+            if (issue.pull_request) {
+              problems.push('This automation only runs on issues, not pull requests.');
+            }
+            if (issue.state !== 'open') {
+              problems.push(`Issue is ${issue.state}; only open issues can be processed.`);
+            }
+
             const hasMaintainerPermission = async (login) => {
               try {
                 const permission = await github.rest.repos.getCollaboratorPermissionLevel({
@@ -221,11 +296,27 @@ jobs:
               approvalActor = issue.user.login;
             }
 
+            // FIX: this block was duplicated further down and pushed the same
+            // problem twice; it now appears only once.
             if (!approved) {
               problems.push(
                 `A maintainer must add the \`${process.env.APPROVAL_LABEL}\` label ` +
                 'before the coding agent can run.'
               );
+            }
+
+            // ADDED: once approval is verified, drop the pending-request label.
+            // This does not retrigger the caller because the caller only reruns
+            // on the approval label.
+            if (approved &&
+                !problems.some((problem) => problem.includes('Only a repository maintainer')) &&
+                labels.includes(process.env.REQUEST_LABEL)) {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: process.env.REQUEST_LABEL
+              });
             }
 
             if (!targetBranch) {
@@ -244,13 +335,6 @@ jobs:
                   throw error;
                 }
               }
-            }
-
-            if (!approved) {
-              problems.push(
-                `A maintainer must add the \`${process.env.APPROVAL_LABEL}\` label ` +
-                'before the coding agent can run.'
-              );
             }
 
             const existing = await github.rest.pulls.list({
@@ -355,10 +439,14 @@ jobs:
         if: steps.verify.outputs.eligible == 'true'
         id: tools
         run: |
-          npm install --global @openai/codex@0.146.0
+          npm install --global @openai/codex@0.150.0
           archive="${RUNNER_TEMP}/gitleaks.tar.gz"
           bin_dir="${RUNNER_TEMP}/codex-common-bin"
           mkdir -p "$bin_dir"
+          if [ "$ENABLE_TERRAFORM_MCP" = "true" ]; then
+            docker pull "$TERRAFORM_MCP_IMAGE"
+            docker image inspect "$TERRAFORM_MCP_IMAGE" >/dev/null
+          fi
           curl --fail --silent --show-error --location \
             --output "$archive" \
             https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
@@ -583,6 +671,17 @@ jobs:
             });
             core.setOutput('url', pull.data.html_url);
 
+      # ADDED: if the branch was pushed but PR creation failed, remove the
+      # orphaned branch so reruns and repository hygiene are not affected.
+      - name: Delete orphaned branch if PR creation failed
+        if: always() && steps.publish.outputs.did_fix == 'true' && !steps.pull-request.outputs.url
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPOSITORY_ROOT: ${{ github.workspace }}/target-repository
+        run: |
+          git -C "$REPOSITORY_ROOT" push origin --delete "$FIX_BRANCH" ||
+            echo "::warning::Could not delete orphaned branch ${FIX_BRANCH}"
+
       # Report all eligible outcomes, including safe no-change outcomes.
       - name: Report automation result
         if: always() && steps.verify.outputs.eligible == 'true'
@@ -599,6 +698,8 @@ jobs:
           TRIGGER_ACTOR: ${{ github.actor }}
           RESULT_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.json
           RESULT_SAFE_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.safe
+          COMPLETED_LABEL: ${{ env.COMPLETED_LABEL }}
+          FAILED_LABEL: ${{ env.FAILED_LABEL }}
         with:
           script: |
             const fs = require('fs');
@@ -634,6 +735,38 @@ jobs:
                 core.warning('Could not parse the secret-scanned Codex result.');
               }
             }
+
+            // Keep result labels mutually exclusive across retries.
+            const succeeded = process.env.DID_FIX === 'true' && prCreated;
+            const resultLabel = succeeded
+              ? process.env.COMPLETED_LABEL
+              : process.env.FAILED_LABEL;
+            const staleResultLabel = succeeded
+              ? process.env.FAILED_LABEL
+              : process.env.COMPLETED_LABEL;
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: staleResultLabel
+              });
+            } catch (error) {
+              if (error.status !== 404) {
+                core.warning(`Could not remove stale result label: ${error.message}`);
+              }
+            }
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: [resultLabel]
+              });
+            } catch (error) {
+              core.warning(`Could not add result label: ${error.message}`);
+            }
+
             const body = `${marker}
             ### 🤖 Codex issue automation
 
