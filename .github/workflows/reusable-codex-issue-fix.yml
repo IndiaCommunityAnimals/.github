@@ -69,6 +69,7 @@ jobs:
       REQUEST_LABEL: ${{ inputs.request_label }}
       # ADDED: result labels so maintainers can filter automated issues.
       COMPLETED_LABEL: codex-run-completed
+      BLOCKED_LABEL: codex-run-validation-blocked
       FAILED_LABEL: codex-run-failed
       ISSUE_NUMBER: ${{ github.event.issue.number }}
       FIX_BRANCH: codex/issue-${{ github.event.issue.number }}
@@ -148,7 +149,11 @@ jobs:
               // ADDED: result labels provisioned alongside the workflow labels.
               [process.env.COMPLETED_LABEL]: {
                 color: '0e8a16',
-                description: 'Codex automation produced a pull request for this issue'
+                description: 'Codex automation produced a validated pull request'
+              },
+              [process.env.BLOCKED_LABEL]: {
+                color: 'fbca04',
+                description: 'Codex produced a draft PR with incomplete validation'
               },
               [process.env.FAILED_LABEL]: {
                 color: 'd93f0f',
@@ -606,6 +611,7 @@ jobs:
         env:
           TARGET_BRANCH: ${{ steps.verify.outputs.target_branch }}
           RESULT_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.json
+          CHANGED_FILES_PATH: ${{ runner.temp }}/codex-issue-fix/changed-files.json
           ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
           APPROVAL_ACTOR: ${{ steps.verify.outputs.approval_actor }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
@@ -616,20 +622,47 @@ jobs:
             const fs = require('fs');
             const issue = context.payload.issue;
             const result = JSON.parse(fs.readFileSync(process.env.RESULT_PATH, 'utf8'));
+            const changedFiles = JSON.parse(
+              fs.readFileSync(process.env.CHANGED_FILES_PATH, 'utf8')
+            );
             const cleanTitle = issue.title
               .replace(/^\[(Bug|Task|Feature)\]:\s*/i, '')
               .slice(0, 180);
+            const singleLine = (value) => String(value).replace(/\s+/g, ' ').trim();
+            const inlineCode = (value) => singleLine(value).replace(/`/g, '\\`');
+            const validationLabels = {
+              passed: 'passed',
+              failed: 'failed — implementation or repository issue',
+              blocked: 'incomplete — environment or tooling limitation'
+            };
+            const commandLabels = {
+              passed: 'passed',
+              failed: 'failed',
+              blocked: 'blocked by environment/tooling',
+              skipped: 'skipped because a prerequisite failed'
+            };
 
+            const changeLines = result.changes
+              .map((change) => `- ${singleLine(change)}`)
+              .join('\n');
+            const changedFileLines = changedFiles.length > 0
+              ? changedFiles.map((file) => `- \`${inlineCode(file)}\``).join('\n')
+              : '- No changed files were recorded.';
             const commandLines = result.validation.commands.map((entry) =>
-              `- \`${entry.command}\` — **${entry.result}**` +
-              (entry.details ? `: ${entry.details}` : '')
+              `- \`${inlineCode(entry.command)}\` — **${
+                commandLabels[entry.result] || entry.result
+              }**` + (entry.details ? `: ${singleLine(entry.details)}` : '')
             ).join('\n');
-            const failure = result.validation.status === 'passed'
+            const reason = result.validation.status === 'passed'
               ? ''
-              : `\n\n**Failure reason:** ${result.validation.failure_reason ||
-                  'The repository validation did not pass.'}`;
+              : `\n\n**${result.validation.status === 'blocked'
+                  ? 'Blocking reason'
+                  : 'Failure reason'}:** ${singleLine(
+                    result.validation.failure_reason ||
+                    'The repository validation did not pass.'
+                  )}`;
             const risks = result.risks.length > 0
-              ? result.risks.map((risk) => `- ${risk}`).join('\n')
+              ? result.risks.map((risk) => `- ${singleLine(risk)}`).join('\n')
               : '- No additional risks reported by Codex.';
 
             const pull = await github.rest.pulls.create({
@@ -637,23 +670,38 @@ jobs:
               repo: context.repo.repo,
               head: process.env.FIX_BRANCH,
               base: process.env.TARGET_BRANCH,
-              // Keep validation evidence advisory for PR creation: unresolved
-              // checks produce a draft instead of discarding reviewable work.
+              // Keep incomplete validation visible but never merge-ready.
               draft: result.validation.status !== 'passed',
               title: `fix: ${cleanTitle}`,
               body: `## Problem
 
             Addresses #${issue.number}.
 
-            ## Root cause and approach
+            ## Summary
+
+            ${result.summary}
+
+            ## Changes
+
+            ${changeLines}
+
+            <details>
+            <summary>Files changed</summary>
+
+            ${changedFileLines}
+            </details>
+
+            ## Implementation approach
 
             ${result.approach}
 
             ## Validation
 
-            Overall status: **${result.validation.status}**
+            Automated validation: **${validationLabels[result.validation.status]}**
 
-            ${commandLines}${failure}
+            ${commandLines}${reason}
+
+            > A blocked or skipped check means validation could not complete; it does not mean that the Terraform configuration failed that check.
 
             ## Risks and limitations
 
@@ -671,7 +719,7 @@ jobs:
             - Issue author: @${process.env.ISSUE_AUTHOR}
             - Approval maintainer: @${process.env.APPROVAL_ACTOR}
             - Triggered by: @${process.env.TRIGGER_ACTOR}
-            - Workflow run: ${process.env.WORKFLOW_RUN_ID}`
+            - Workflow run: [${process.env.WORKFLOW_RUN_ID}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.WORKFLOW_RUN_ID})`
             });
             core.setOutput('url', pull.data.html_url);
 
@@ -686,9 +734,11 @@ jobs:
           git -C "$REPOSITORY_ROOT" push origin --delete "$FIX_BRANCH" ||
             echo "::warning::Could not delete orphaned branch ${FIX_BRANCH}"
 
-      # Report all eligible outcomes, including safe no-change outcomes.
+      # Report completed eligible outcomes, including safe no-change outcomes.
+      # A superseded run must not overwrite the replacement run's comment or
+      # result labels with a generic failure while cancellation unwinds.
       - name: Report automation result
-        if: always() && steps.verify.outputs.eligible == 'true'
+        if: always() && !cancelled() && steps.verify.outputs.eligible == 'true'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           DID_FIX: ${{ steps.publish.outputs.did_fix }}
@@ -703,6 +753,7 @@ jobs:
           RESULT_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.json
           RESULT_SAFE_PATH: ${{ runner.temp }}/codex-issue-fix/agent-result.safe
           COMPLETED_LABEL: ${{ env.COMPLETED_LABEL }}
+          BLOCKED_LABEL: ${{ env.BLOCKED_LABEL }}
           FAILED_LABEL: ${{ env.FAILED_LABEL }}
         with:
           script: |
@@ -718,6 +769,7 @@ jobs:
               : process.env.FIX_REASON || process.env.PREPARE_REASON ||
                 'The workflow failed before it could produce a change.';
             let details = '';
+            let validationStatus = '';
             if (fs.existsSync(process.env.RESULT_SAFE_PATH) &&
                 fs.existsSync(process.env.RESULT_PATH)) {
               try {
@@ -726,7 +778,11 @@ jobs:
                   const result = JSON.parse(rawResult);
                   const validation = result?.validation;
                   if (validation && ['passed', 'failed', 'blocked'].includes(validation.status)) {
-                    details = `\n\nValidation status: **${validation.status}**`;
+                    validationStatus = validation.status;
+                    const statusLabel = validation.status === 'blocked'
+                      ? 'incomplete — environment or tooling limitation'
+                      : validation.status;
+                    details = `\n\nAutomated validation: **${statusLabel}**`;
                     if (Array.isArray(validation.commands) && validation.commands.length > 0) {
                       const commandLines = validation.commands.map((entry) => {
                         const command = String(entry.command || 'unknown command')
@@ -754,24 +810,31 @@ jobs:
               }
             }
 
-            // Keep result labels mutually exclusive across retries.
-            const succeeded = process.env.DID_FIX === 'true' && prCreated;
-            const resultLabel = succeeded
+            // Keep result labels mutually exclusive across retries. A draft PR
+            // with incomplete validation is not labelled as completed.
+            const resultLabel = prCreated && validationStatus === 'passed'
               ? process.env.COMPLETED_LABEL
-              : process.env.FAILED_LABEL;
-            const staleResultLabel = succeeded
-              ? process.env.FAILED_LABEL
-              : process.env.COMPLETED_LABEL;
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                name: staleResultLabel
-              });
-            } catch (error) {
-              if (error.status !== 404) {
-                core.warning(`Could not remove stale result label: ${error.message}`);
+              : prCreated && ['failed', 'blocked'].includes(validationStatus)
+                ? process.env.BLOCKED_LABEL
+                : process.env.FAILED_LABEL;
+            const allResultLabels = [
+              process.env.COMPLETED_LABEL,
+              process.env.BLOCKED_LABEL,
+              process.env.FAILED_LABEL
+            ];
+            for (const staleResultLabel of allResultLabels) {
+              if (staleResultLabel === resultLabel) continue;
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  name: staleResultLabel
+                });
+              } catch (error) {
+                if (error.status !== 404) {
+                  core.warning(`Could not remove stale result label: ${error.message}`);
+                }
               }
             }
             try {

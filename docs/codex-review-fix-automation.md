@@ -42,13 +42,17 @@ stack-agnostic. The loop no longer assumes a backend, frontend, Terraform,
 directory, provider, runtime, package manager, or test framework.
 
 The repository owns validation through `.agents/skills/repository-validation/SKILL.md`.
-The Codex fixer reads that skill, runs its setup and every required command,
-and makes one repair attempt for implementation-caused failures. The shared
-controller does not assume a language, directory, provider, runtime, package
-manager, or validation command. It records Codex's reported commands and
-results in the evidence comment; repository CI remains authoritative for merge.
-Terraform scripts should use `TF_PLUGIN_CACHE_DIR` or a provider mirror; TFLint
-scripts should pin and initialize plugins separately and retain their logs.
+The workflow runs the reviewed base branch's optional setup script before Codex
+starts. If the base also provides executable `scripts/validate.sh`, the workflow
+copies that protected version and runs it on the trusted GitHub runner after the
+fix, outside the Codex sandbox. The script owns the exact command; the shared
+controller only knows its `command` and `run <repository-root>` interface. The
+runner result is prepended to the evidence comment. Without `validate.sh`, the
+fixer follows the legacy skill-defined validation contract. Repository CI
+remains authoritative for merge.
+Terraform setup should prepare a lockfile-backed provider mirror and writable
+runtime directories for the trusted validator; it should not add plan or lint
+commands unless the repository explicitly requires them.
 
 The fixer may modify any repository path only when the path is cited by an
 agreed finding using `file:line`. There is no profile path prefix. New files
@@ -127,8 +131,11 @@ just because the two automations now share a repository.
   the round continues with the remaining cited changes.
 - Whole-file deletion attempted: reverted, logged, and captured for a human
   to evaluate — never silently dropped.
-- Codex reports a validation failure: the exact command and result are kept in
-  the evidence comment; repository CI remains authoritative for merge.
+- Repository validation setup fails: the loop stops before Codex and reports a
+  failed workflow instead of entering review without its required tools.
+- Trusted validation fails: the exact runner command, exit status, and bounded
+  log output are kept in the evidence comment; repository CI remains
+  authoritative for merge.
 - Push rejected (branch moved during the run): job fails loudly; fixes were
   validated locally but not pushed.
 - Success: one or more commits on the PR's own branch, one PR comment with
