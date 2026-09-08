@@ -1,485 +1,406 @@
-# Bootstrap the Organization-Wide Codex CI Automation
+# Organization-Wide Codex CI Automation: Setup & Bootstrap Guide
 
-This runbook explains how to reproduce the CI automation from
-`IndiaCommunityAnimals/.github` in a different GitHub organization. It covers
-only the CI control plane: organization files, reusable workflows, repository
-callers, the publishing GitHub App, Codex authentication, validation contracts,
-repository settings, rollout, and operations. It does not copy application,
-AWS deployment, Terraform state, or production configuration.
+This guide provides a step-by-step walkthrough for bootstrapping the organization-wide Codex CI automation in a new or existing GitHub organization. It covers the complete setup of the central CI control plane, the publishing GitHub App, authentication secrets, and target repository onboarding.
 
-For the behavior of every workflow stage, see
-[Complete CI Automation Guide](docs/ci-automation-guide.md). This document is the
-installation and onboarding procedure.
+> [!IMPORTANT]
+> **Security & Boundary Model:**
+> - This automation can draft code changes, run isolated validations, push fix commits, and open pull requests.
+> - **It never merges code or deploys to any environment.**
+> - Merging to protected branches strictly requires human review and repository CI passing.
 
-> **Security boundary:** this automation can write source code and create or
-> update pull requests. It never merges or deploys. Keep required CI checks and
-> human review in branch protection or rulesets.
+---
 
-## 1. What you are installing
+## Architecture at a Glance
 
-The installation has one central repository and one small integration in each
-participating repository:
+The automation divides responsibilities into a **Central Control Plane** (reusable workflows and prompts) and **Target Repositories** (event callers and repository-specific validation):
 
 ```text
-NEW_ORG/.github
-├── .github/ISSUE_TEMPLATE/                  # inherited issue forms
-├── .github/workflows/
-│   ├── reusable-codex-issue-fix.yml         # workflow_call only
-│   └── reusable-codex-review-fix.yml        # workflow_call only
-├── automation/codex-issue-fix/              # verifier, prompt, schema, controller
-├── automation/codex-review-fix/             # prompts and review/fix loop
-├── AGENTS.md                                 # organization agent policy
-└── docs/                                     # maintainer documentation
-
-NEW_ORG/each-target-repository
-├── .github/workflows/codex-issue-fix.yml     # local issues event caller
-├── .github/workflows/codex-review-fix.yml    # local pull_request event caller
-├── .agents/skills/repository-validation/
-│   ├── SKILL.md                              # exact repository checks (required)
-│   └── scripts/                              # optional setup/validate/cleanup scripts
-├── AGENTS.md                                 # repository-specific rules
-└── .github/workflows/<normal-ci>.yml          # tests/builds remain repository-owned
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                             NEW_ORG/.github                                      │
+│                                                                                  │
+│   .github/workflows/reusable-codex-issue-fix.yml   (Reusable Issue -> PR)        │
+│   .github/workflows/reusable-codex-review-fix.yml  (Reusable PR Review -> Fix)   │
+│   automation/codex-issue-fix/                      (Verifier, Prompt, Schema)    │
+│   automation/codex-review-fix/                     (Prompts, Review Loop)        │
+│   .github/ISSUE_TEMPLATE/                          (Inherited Issue Forms)       │
+│   AGENTS.md                                        (Organization Agent Policy)   │
+└───────────────────────▲──────────────────────────────────▲───────────────────────┘
+                        │ uses: reusable workflow          │ uses: reusable workflow
+                        │ with: automation_ref             │ with: automation_ref
+┌───────────────────────┴──────────────────────────────────┴───────────────────────┐
+│                    Target Repository (e.g. infrastructure-sandbox)               │
+│                                                                                  │
+│   .github/workflows/codex-issue-fix.yml            (Local issues caller)         │
+│   .github/workflows/codex-review-fix.yml           (Local pull_request caller)   │
+│   .agents/skills/repository-validation/                                          │
+│     ├── SKILL.md                                   (Mandatory validation gates)  │
+│     └── scripts/setup.sh                           (Optional toolchain installer)│
+│   AGENTS.md                                        (Local repo rules)            │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-GitHub events belong to the repository where the issue or PR exists. Therefore,
-the central reusable workflows cannot replace the two local caller files.
-
-### 1.1 Identity and credential separation
-
-There are three distinct identities:
-
-| Identity | Purpose | Where it exists |
-|---|---|---|
-| Caller `GITHUB_TOKEN` | Verify issues, create labels, and post verification/result comments | Automatically created for the caller job, limited by caller permissions |
-| GitHub App installation token | Push branches/fixes and create PRs/comments as the automation bot | Minted only in publishing steps from `CLIENT_ID` and `PRIVATE_KEY` |
-| Codex credential | Authenticate `codex exec` | Restored shortly before Codex runs and removed immediately afterward |
-
-The GitHub App private key is never passed to Codex. The target checkout used by
-issue implementation has no persisted GitHub credentials. The issue automation
-runs Codex in a disposable exported worktree; only a secret-scanned patch is
-later applied to the authenticated checkout.
-
-## 2. Prerequisites and placeholders
-
-Before starting, confirm:
-
-- You are an owner of `NEW_ORG`, or can manage organization GitHub Apps,
-  Actions policies, secrets, and repositories.
-- GitHub Actions is enabled for the target repositories.
-- The target repositories have Issues enabled if issue-to-PR automation will be
-  used.
-- You have a trusted workstation on which you can run `codex login` if you
-  reproduce the current `CODEX_AUTH_JSON` path.
-- Every target repository has an authoritative test/build workflow and a clear
-  repository-specific validation contract.
-- Branch rules require human review and required CI; the bot cannot merge.
-
-Use these placeholders consistently:
-
-| Placeholder | Meaning |
-|---|---|
-| `NEW_ORG` | Destination GitHub organization login |
-| `CENTRAL_SHA` | Full 40-character commit SHA of reviewed central automation |
-| `TARGET_REPO` | One repository being onboarded |
-| `APP_NAME` | Human-readable GitHub App name |
-
-## 3. Create the central `.github` repository
-
-Create a repository literally named `.github` under `NEW_ORG`. For a normal
-GitHub organization it must be public for organization-default community files
-to apply. An enterprise managed-user organization uses an internal repository.
-GitHub applies defaults only when a target repository has no local file of the
-same type; for issue templates, any local `.github/ISSUE_TEMPLATE` content
-overrides the entire inherited template set. See
-[GitHub's default community health file rules](https://docs.github.com/en/enterprise-cloud@latest/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file).
-
-Do not put secrets in this repository. A public central repository exposes
-workflow, prompt, and policy source, but Actions secrets remain in GitHub's
-secret store and are forwarded only by explicitly configured callers.
-
-### 3.1 Copy the CI files
-
-Copy these paths from the source `.github` repository while preserving their
-relative paths and executable bits:
-
-```text
-.github/ISSUE_TEMPLATE/bug-template.yml
-.github/ISSUE_TEMPLATE/config.yml
-.github/ISSUE_TEMPLATE/feature-template.yml
-.github/ISSUE_TEMPLATE/general-discussion-template.yml
-.github/ISSUE_TEMPLATE/technical-task-template.yml
-.github/workflows/reusable-codex-issue-fix.yml
-.github/workflows/reusable-codex-review-fix.yml
-automation/codex-issue-fix/agent-output.schema.json
-automation/codex-issue-fix/prompts/base.md
-automation/codex-issue-fix/run-agent.sh
-automation/codex-issue-fix/verify-issue.js
-automation/codex-review-fix/prompts/evidence-template.md
-automation/codex-review-fix/prompts/review.md
-automation/codex-review-fix/run-loop.sh
-AGENTS.md
-```
-
-Copy the documentation if useful to destination maintainers. Normal application
-CI files are not copied into the central repository.
-
-### 3.2 Replace organization-specific values
-
-Search the copied source before committing:
-
-```bash
-grep -RInE 'IndiaCommunityAnimals|animal-automation|community-animal' \
-  --exclude-dir=.git .
-```
-
-At minimum, change both reusable workflows:
-
-- `repository: IndiaCommunityAnimals/.github` to
-  `repository: NEW_ORG/.github`;
-- both `automation_ref` descriptions;
-- the issue publisher's `animal-automation-bot[bot]` Git author and email to a
-  neutral destination value such as `NEW_ORG-automation[bot]` (the commit's
-  authenticated actor will still be the GitHub App);
-- organization names and policy links in `AGENTS.md`, `README.md`, and docs.
-
-Do not replace GitHub expression syntax such as `${{ github.repository }}`.
-Do not change prompt, gate, protected-path, or permission logic merely to make
-the initial port easier.
-
-### 3.3 Preserve reusable-workflow rules
-
-The central files must keep `on: workflow_call`; do not add organization-wide
-`issues` or `pull_request` triggers to them. Each target repository owns
-those events through its caller.
-
-Keep actions and downloaded tools pinned. Review versions and checksums during
-the port instead of replacing them with mutable `@main` references.
-
-### 3.4 Central repository Actions access
-
-If the central workflow repository is private in a setup that does not rely on
-inherited issue forms, go to:
-
-`NEW_ORG/.github` → **Settings** → **Actions** → **General** → **Access**
-
-and select **Accessible from repositories in the `NEW_ORG` organization**.
-GitHub documents this at
-[Sharing actions and workflows with your organization](https://docs.github.com/en/actions/how-tos/reuse-automations/share-with-your-organization).
-
-For the normal public special `.github` repository, ensure organization and
-target-repository Actions policies allow:
-
-- `NEW_ORG/.github/.github/workflows/*`;
-- `actions/checkout`;
-- `actions/github-script`; and
-- `actions/create-github-app-token`.
-
-If the organization allowlists actions, allow the exact tags or SHAs referenced
-by the copied workflow. See
-[organization Actions policy settings](https://docs.github.com/en/organizations/managing-organization-settings/disabling-or-limiting-github-actions-for-your-organization).
-
-### 3.5 Review and record an immutable ref
-
-Open a human-reviewed PR in `NEW_ORG/.github`. After merge, record:
-
-```bash
-git rev-parse HEAD
-```
-
-Use that full `CENTRAL_SHA` in every caller's `uses:` value and
-`automation_ref` input. The values must match because `automation_ref`
-controls which scripts and prompts the reusable workflow checks out. A full SHA
-is the strongest immutable pin.
-
-## 4. Create the publishing GitHub App
-
-![GitHub organization GitHub App configuration](docs/image.png)
-
-The App gives automated pushes and PR creation a short-lived, non-human
-identity. App-authored events can start normal PR CI without the special
-approval behavior associated with PRs created using only `GITHUB_TOKEN`.
-See [Triggering a workflow](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
-
-### 4.1 Register the App under the organization
-
-![Registering a new GitHub App](docs/image-1.png)
-
-As an organization owner:
-
-1. Open GitHub → **Your organizations** → `NEW_ORG` → **Settings**.
-2. Open **Developer settings** → **GitHub Apps** → **New GitHub App**.
-3. Use settings equivalent to this table.
-
-| Field | Value |
-|---|---|
-| GitHub App name | Globally unique, for example `NEW_ORG Codex Automation` |
-| Description | Publishes Codex issue fixes and review fixes for `NEW_ORG` |
-| Homepage URL | `https://github.com/NEW_ORG/.github` |
-| Callback URL | Blank |
-| Request user authorization during installation | Off |
-| Enable Device Flow | Off |
-| Setup URL | Blank |
-| Webhook Active | Off; Actions events drive this automation |
-| Where can this GitHub App be installed? | **Only on this account** |
-
-No OAuth callback, user authorization, device flow, or webhook endpoint is
-required. GitHub permits webhook delivery to be disabled for an App used only
-for authentication. See
-[Registering a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app).
-
-### 4.2 Grant minimum repository permissions
-
-![Minimum repository permissions for the automation App](docs/image-2.png)
-
-Configure these **Repository permissions**:
-
-| Permission | Access | Why |
-|---|---|---|
-| Contents | Read and write | Check out with the App token and push issue/review fix commits |
-| Pull requests | Read and write | Create PRs and create/update review evidence comments |
-| Metadata | Read-only | Automatically included by GitHub |
-
-Set every other repository and organization permission to **No access** unless
-you deliberately extend and review the automation. In particular:
-
-- Do not grant Administration, Secrets, Actions, Deployments, Environments, or
-  organization-wide write access.
-- Do not grant `Workflows: write` for the baseline. GitHub requires it to edit
-  `.github/workflows`; not granting it prevents the App from publishing such
-  changes. If your design intentionally permits that, treat it as a separate
-  privilege expansion and update guards and docs.
-- The issue caller's labels and issue comments use its scoped `GITHUB_TOKEN`.
-  The baseline App does not need a separate Issues permission.
-
-GitHub recommends minimum App permissions and documents HTTP Git access at
-[Choosing permissions for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app).
-
-Subscribe to no webhook events. Select **Only on this account**, then create the
-App.
-
-### 4.3 Record Client ID
-
-On the App settings page, copy **Client ID**, not **App ID**. The workflows call
-`actions/create-github-app-token@v3` using `client-id`. GitHub's example
-distinguishes these at
-[Authenticating with a GitHub App in Actions](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/making-authenticated-api-requests-with-a-github-app-in-a-github-actions-workflow).
-
-Although GitHub's generic example uses an Actions variable for Client ID, this
-automation declares `CLIENT_ID` as a secret. Keep that exact secret name unless
-you change both reusable workflows and every caller.
-
-### 4.4 Generate and protect the private key
-
-On the App settings page:
-
-1. Scroll to **Private keys**.
-2. Click **Generate a private key**.
-3. Save the PEM in a trusted password manager or vault.
-4. Store the complete PEM, including `BEGIN` and `END` lines, as
-   `PRIVATE_KEY`.
-5. Delete any unprotected local copy after secret storage is verified.
-
-GitHub stores only the public half; the key cannot be downloaded again.
-Generate a replacement before deleting the old key during rotation. See
-[Managing private keys for GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps).
-
-### 4.5 Install the App
-
-Choose **Install App** → `NEW_ORG` → **Install**. Start with **Only select
-repositories** and select only pilot repositories. GitHub documents the steps
-at [Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app).
-
-For every later repository, update both independent lists:
-
-1. repositories accessible to the App installation; and
-2. repositories allowed to read each organization Actions secret.
-
-## 5. Configure Actions secrets
-
-![GitHub Actions organization secrets configuration](docs/image-3.png)
-
-The unchanged workflows require exactly:
-
-| Secret | Exact content | Rotation owner |
-|---|---|---|
-| `CLIENT_ID` | GitHub App Client ID, not App ID | GitHub App administrator |
-| `PRIVATE_KEY` | Complete PEM private key | GitHub App administrator |
-| `CODEX_AUTH_JSON` | Raw `~/.codex/auth.json`, not base64 | Trusted Codex account owner |
-
-Prefer organization Actions secrets with **Selected repositories** access.
-GitHub supports selected-repository policies; see
-[GitHub Actions secrets](https://docs.github.com/en/enterprise-cloud@latest/actions/concepts/security/secrets).
-
-In the UI:
-
-1. Open `NEW_ORG` → **Settings**.
-2. Open **Secrets and variables** → **Actions**.
-3. Select **New organization secret**.
-4. Create each exact name above.
-5. Choose **Selected repositories** and only onboarded repositories.
-
-Repository secrets may be used for a pilot, but centralized secrets are easier
-to rotate consistently.
-
-### 5.1 CLI examples
-
-With authenticated GitHub CLI and comma-separated repository names:
-
-```bash
-export ORG=NEW_ORG
-export REPOS=repo-one,repo-two
-
-gh secret set CLIENT_ID --org "$ORG" --repos "$REPOS" \
-  --body "$CLIENT_ID_VALUE"
-
-gh secret set PRIVATE_KEY --org "$ORG" --repos "$REPOS" \
-  < /trusted/path/app-private-key.pem
-```
-
-Do not put values in shell history, repository `.env` files, issue/PR bodies,
-logs, or workflow YAML.
-
-## 6. Configure Codex authentication
-
-### 6.1 Reproduce the current implementation
-
-The copied workflows write raw `CODEX_AUTH_JSON` to
-`~/.codex/auth.json` with mode `0600`, restore it only after setup, and remove
-it after Codex. They do not accept an OpenAI API key without code changes.
-
-On a trusted workstation:
-
-1. Install the same Codex CLI version family used by the workflows.
-2. Configure file-backed credential storage:
-
-   ```toml
-   # ~/.codex/config.toml
-   cli_auth_credentials_store = "file"
+### Automation Flows
+
+1. **Issue-to-PR Flow:**
+   ```text
+   Issue Form Submitted (with Target Branch)
+     └─► Verifier checks syntax, headings & author permissions
+           ├─► Contributor: tagged `codex-run-requested` ──► Maintainer labels `codex-run-approved`
+           └─► Maintainer: automatically approved
+                 └─► Disposable Linux Sandbox exports codebase
+                       └─► Runs optional setup.sh (installs CLI tools)
+                             └─► Codex implements solution & validates locally via SKILL.md
+                                   └─► Gates: Protected path check + Gitleaks scan
+                                         └─► GitHub App commits to `codex/issue-<ID>` branch
+                                               ├─► Validation passed: review-ready PR + `codex-run-completed`
+                                               └─► Validation incomplete: draft PR + `codex-run-validation-blocked`
    ```
 
-3. Authenticate:
+2. **PR Review-Fix Loop Flow:**
+   ```text
+   Pull Request Opened / Synchronized (same repository only)
+     └─► Reviewer agent inspects diff against AGENTS.md
+           └─► Discovers actionable findings & initiates negotiation loop
+                 └─► Fixer agent resolves findings & validates locally via SKILL.md
+                       └─► Gates: Only cited files modified + deletion thresholds satisfied
+                             └─► GitHub App pushes fix commit `[codex-autofix]`
+                                   └─► App publishes or updates PR evidence comment
+   ```
 
+---
+
+## Prerequisites & Setup Placeholders
+
+Before starting, confirm you have:
+1. **GitHub Organization Owner** or admin permissions to configure GitHub Apps, Actions, and Secrets.
+2. A **trusted local workstation** with the Codex CLI installed to generate initial ChatGPT authentication.
+3. Target repositories with **Issues** and **GitHub Actions** enabled.
+
+Throughout this guide, replace these placeholders with your actual values:
+
+| Placeholder | Meaning | Example |
+|---|---|---|
+| `NEW_ORG` | Your destination GitHub organization name | `IndiaCommunityAnimals` |
+| `TARGET_REPO` | Target repository being onboarded | `community-animal-registry-infrastructure-sandbox` |
+| `CENTRAL_SHA` | 40-character commit SHA or branch (`main`) of `NEW_ORG/.github` | `main` or `e1911f8...` |
+| `APP_NAME` | Name of the GitHub App for publishing | `IndiaCommunityAnimals Codex Automation` |
+
+---
+
+## Phase 1: Set Up Central Control Plane (`NEW_ORG/.github`)
+
+**Where to make this change:** Create a repository literally named `.github` under `NEW_ORG`.
+
+> [!NOTE]
+> The `.github` repository holds organization-wide defaults. It must be **public** (or **internal** in GitHub Enterprise Managed Users) for organization-default community files like issue templates to inherit automatically.
+
+### Step 1.1: Copy Automation Files
+
+Copy the following paths from the upstream template (`IndiaCommunityAnimals/.github`) into your `NEW_ORG/.github` repository:
+
+```text
+NEW_ORG/.github/
+├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug-template.yml
+│   │   ├── config.yml
+│   │   ├── feature-template.yml
+│   │   ├── general-discussion-template.yml
+│   │   └── technical-task-template.yml
+│   └── workflows/
+│       ├── reusable-codex-issue-fix.yml
+│       └── reusable-codex-review-fix.yml
+├── automation/
+│   ├── codex-issue-fix/
+│   │   ├── agent-output.schema.json
+│   │   ├── prompts/base.md
+│   │   ├── run-agent.sh
+│   │   └── verify-issue.js
+│   └── codex-review-fix/
+│       ├── prompts/
+│       │   ├── evidence-template.md
+│       │   └── review.md
+│       └── run-loop.sh
+└── AGENTS.md
+```
+
+### Step 1.2: Customize Organization Names & Documentation
+
+The reusable workflows are now generic by default:
+- They dynamically check out the current organization's central repository using `repository: ${{ github.repository_owner }}/.github`.
+- Git fix commits use the neutral author `codex-automation-bot[bot]`.
+
+You only need to review and update organization names in policy and documentation files:
+1. In `AGENTS.md` and `README.md`: Update organization names and links to match `NEW_ORG`.
+2. (Optional) Run a search to verify any custom branding or policy references:
+   ```bash
+   grep -RInE 'IndiaCommunityAnimals|animal-automation' --exclude-dir=.git .
+   ```
+
+### Step 1.3: Configure Central Workflow Access
+
+Ensure target repositories can call these reusable workflows:
+1. Navigate to: `https://github.com/organizations/NEW_ORG/repositories` → click `.github`.
+2. Go to **Settings** → **Actions** → **General**.
+3. Under **Access**, select **Accessible from repositories in the 'NEW_ORG' organization**.
+
+### Step 1.4: Commit and Note the Reference
+
+Commit all files and push to `main`. If you use immutable SHA pinning for production supply-chain defense, note the commit SHA:
+```bash
+git rev-parse HEAD
+# Output example: e1911f81ee4d53d7da9c7f1fe68de6de2efb6dab
+```
+*(You will use this `CENTRAL_SHA` or `main` when configuring target repositories).*
+
+---
+
+## Phase 2: Create & Configure the Publishing GitHub App
+![alt text](image.png)
+**Where to make this change:** GitHub Organization Settings → Developer Settings.
+
+The GitHub App creates an ephemeral, authenticated identity used by GitHub Actions to push branches, commit fixes, and open PRs. Pushes made by an App token trigger normal repository CI checks (unlike standard `GITHUB_TOKEN` pushes).
+
+### Step 2.1: Register the App
+![alt text](image-1.png)
+1. Go to: `https://github.com/organizations/NEW_ORG/settings/apps`.
+2. Click **New GitHub App**.
+3. Fill in the required fields:
+
+| Field | Value | Notes |
+|---|---|---|
+| **GitHub App name** | `NEW_ORG Codex Automation` | Must be globally unique across GitHub |
+| **Homepage URL** | `https://github.com/NEW_ORG/.github` | Links to central repo docs |
+| **Callback URL** | *(Leave blank)* | Not used |
+| **Webhook Active** | **Uncheck** *(Deactivate)* | No webhooks needed; Actions triggers workflows |
+| **Where can this app be installed?** | **Only on this account** | Keeps the App private to your org |
+
+### Step 2.2: Set Minimum Permissions
+![alt text](image-2.png)
+Under **Repository permissions**, configure exactly:
+
+| Permission | Access | Why It Is Needed |
+|---|---|---|
+| **Contents** | **Read and write** | Create `codex/issue-*` branches and commit fix patches |
+| **Pull requests** | **Read and write** | Create pull requests and publish review evidence comments |
+| **Metadata** | **Read-only** | Automatically set by GitHub for all Apps |
+
+> [!WARNING]
+> Keep all other permissions set to **No access**. Do **not** grant *Workflows: write*, *Administration*, or *Secrets* permissions.
+
+Click **Create GitHub App**.
+
+### Step 2.3: Record Client ID & Generate Private Key
+
+1. On the app summary page, find the **Client ID** (e.g. `Iv23...`).
+   > [!IMPORTANT]
+   > Record the **Client ID**, **NOT** the numeric App ID.
+2. Scroll down to **Private keys** and click **Generate a private key**.
+3. A `.pem` file will download to your machine (e.g. `new-org-codex-automation.private-key.pem`).
+4. Keep this file safe. This is your `PRIVATE_KEY` secret.
+
+### Step 2.4: Install the App on Target Repositories
+
+1. On the left sidebar of the App page, click **Install App**.
+2. Click **Install** next to `NEW_ORG`.
+3. Choose **Only select repositories**, and select your target repositories (e.g. `community-animal-registry-infrastructure-sandbox`).
+4. Click **Save** / **Install**.
+
+---
+
+## Phase 3: Set Up Authentication & Organization Secrets
+![alt text](image-3.png)
+**Where to make this change:** Workstation terminal + GitHub Organization Secrets settings.
+
+The automation requires three organization secrets:
+
+| Secret Name | Exact Content | Purpose |
+|---|---|---|
+| `CLIENT_ID` | String (Client ID from Step 2.3) | Used by `actions/create-github-app-token` |
+| `PRIVATE_KEY` | Full PEM content (including `BEGIN`/`END` lines) | Signs JWT for App token minting |
+| `CODEX_AUTH_JSON` | Raw contents of `~/.codex/auth.json` | Authenticates `codex exec` in the sandbox |
+
+### Step 3.1: Generate `CODEX_AUTH_JSON`
+
+On your local workstation:
+1. Ensure the Codex CLI is installed:
+   ```bash
+   npm install -g @openai/codex@0.145.0
+   ```
+2. Configure file-backed credential storage:
+   ```bash
+   mkdir -p ~/.codex
+   cat << 'EOF' >> ~/.codex/config.toml
+   cli_auth_credentials_store = "file"
+   EOF
+   ```
+3. Run authentication:
    ```bash
    codex login
    ```
-
-4. Verify without printing tokens:
-
+   *Follow the browser prompts to sign in.*
+4. Verify your `auth.json` file without printing secret tokens:
    ```bash
-   AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json"
    jq '{
      auth_mode,
      has_tokens: (.tokens != null),
      has_refresh_token: ((.tokens.refresh_token // "") != ""),
      last_refresh
-   }' "$AUTH_FILE"
+   }' ~/.codex/auth.json
    ```
+   *Verify that `auth_mode` is `chatgpt` and `has_refresh_token` is `true`.*
 
-   Continue only if `auth_mode` is `chatgpt` and
-   `has_refresh_token` is true.
+### Step 3.2: Store Secrets in GitHub Organization
 
-5. Upload raw JSON:
+You can set these via the GitHub Web UI or using the GitHub CLI:
 
-   ```bash
-   gh secret set CODEX_AUTH_JSON --org NEW_ORG \
-     --repos repo-one,repo-two < "$AUTH_FILE"
-   ```
+#### Option A: Using the GitHub CLI (`gh`)
+```bash
+export ORG="NEW_ORG"
+export TARGET_REPOS="community-animal-registry-infrastructure-sandbox"
 
-The secret is JSON, not base64. Never print or commit it.
+# 1. Set CLIENT_ID
+gh secret set CLIENT_ID --org "$ORG" --repos "$TARGET_REPOS" --body "Iv23..."
 
-### 6.2 Current limitation and recommended direction
+# 2. Set PRIVATE_KEY
+gh secret set PRIVATE_KEY --org "$ORG" --repos "$TARGET_REPOS" < /path/to/app-private-key.pem
 
-Official OpenAI documentation recommends API-key authentication for most
-automation and the Codex GitHub Action for GitHub Actions. ChatGPT-managed
-`auth.json` is advanced, for trusted private automation, and must not be used
-for public/open-source repository automation. See
-[Codex non-interactive authentication](https://learn.chatgpt.com/docs/non-interactive-mode#authenticate-in-automation)
-and [CI/CD account-auth maintenance](https://learn.chatgpt.com/docs/auth/ci-cd-auth).
-
-The current workflows run on ephemeral GitHub-hosted runners. Codex may refresh
-`auth.json`, but the workflows delete that file and do not write it back to
-the organization secret. Therefore:
-
-- monitor for empty Codex output, `401`, or refresh failures;
-- rerun `codex login` and replace `CODEX_AUTH_JSON` when needed;
-- do not share one refreshable session across concurrent independent systems;
-- for a durable new installation, plan a reviewed migration to the Codex GitHub
-  Action/API-key auth, workload identity federation, or a trusted
-  persistent/secure round-trip auth store.
-
-Do not put an API key into `CODEX_AUTH_JSON`; it does not match the current
-workflow contract.
-
-## 7. Onboard each target repository
-
-Repeat this section per repository.
-
-### 7.1 Add agent policy
-
-Add a repository `AGENTS.md` that points to
-`NEW_ORG/.github/AGENTS.md` and defines only repository-specific architecture,
-safety, coding, and validation rules. Do not put framework- or
-infrastructure-specific rules in organization policy unless they apply
-everywhere.
-
-### 7.2 Add the required validation skill
-
-Create:
-
-```text
-.agents/skills/repository-validation/SKILL.md
+# 3. Set CODEX_AUTH_JSON (raw JSON file)
+gh secret set CODEX_AUTH_JSON --org "$ORG" --repos "$TARGET_REPOS" < ~/.codex/auth.json
 ```
 
-It must define the repository's exact validation contract: locked dependency
-setup, formatting, linting, type checking, tests, build, audit, and safe
-infrastructure validation as appropriate. Commands must use a documented
-working directory and must not deploy or mutate remote services. When a
-provider-facing check cannot run safely in Codex's restricted sandbox, put it
-behind the trusted `validate.sh` interface described below instead of asking
-Codex to execute it directly.
+#### Option B: Using GitHub Web UI
+1. Go to: `https://github.com/organizations/NEW_ORG/settings/secrets/actions`.
+2. Click **New organization secret**.
+3. Add `CLIENT_ID`, `PRIVATE_KEY`, and `CODEX_AUTH_JSON`.
+4. Under **Repository access**, select **Selected repositories** and choose your target repository.
 
-Optional issue-automation scripts:
+---
 
-```text
-.agents/skills/repository-validation/scripts/setup.sh
-.agents/skills/repository-validation/scripts/validate.sh
-.agents/skills/repository-validation/scripts/cleanup.sh
+## Phase 4: Onboard a Target Repository
+
+**Where to make this change:** Inside each target repository (e.g. `TARGET_REPO`).
+
+Using [community-animal-registry-infrastructure-sandbox](file:///Users/mindstix-dev/Documents/Codex/community-animal-registry-infrastructure-sandbox) as the reference, follow these steps to onboard a repository.
+
+### Step 4.1: Add Repository `AGENTS.md`
+
+Create `AGENTS.md` in the root of the repository. It should inherit the organization policy and specify local conventions:
+
+````markdown
+# Repository Guidelines
+
+## Policy Hierarchy
+This repository follows the organization-wide agent policy defined in
+`NEW_ORG/.github/AGENTS.md`. The rules in this file extend that policy.
+
+## Technical Architecture & Constraints
+- Add architecture context (e.g. Terraform modules, directory layout, language frameworks).
+- Enforce safety boundaries: do NOT run remote cloud mutating commands (`apply`, `destroy`, `plan` with remote state).
+- Explicitly define coding styles, formatting, and file structures.
 ```
 
-Rules:
+### Step 4.2: Add Validation Skill (`SKILL.md`)
 
-- `setup.sh` runs in the disposable issue worktree before Codex credentials.
-  It may install pinned dependencies/tools or prepare an isolated service. It
-  must not modify tracked or non-ignored files.
-- `validate.sh` is loaded from the reviewed base commit and runs after Codex on
-  the trusted GitHub runner. It must support `command` and
-  `run <repository-root>`; exit `0` means passed, `1` means failed, and `2`
-  means the trusted environment is blocked.
-- `cleanup.sh` removes only the isolated validation environment and is
-  attempted after failures.
-- Commit executable bits:
+Create the directory `.agents/skills/repository-validation/` and file `SKILL.md`:
 
-  ```bash
-  chmod +x .agents/skills/repository-validation/scripts/*.sh
-  git add --chmod=+x .agents/skills/repository-validation/scripts/*.sh
-  ```
+```bash
+mkdir -p .agents/skills/repository-validation
+```
 
-- Never include cloud credentials, production tokens, deployment, state, or
-  destructive database commands.
+Create `.agents/skills/repository-validation/SKILL.md`:
 
-The issue controller stops before Codex if the skill is missing. When
-`validate.sh` exists, Codex returns the skill's pending placeholder and the
-controller replaces it with the actual trusted-runner result. An
-implementation failure is sent through one bounded repair turn and validated
-once more. Review-fix uses the same trusted setup and validator. Normal CI is
-the authoritative independent gate.
+```markdown
+---
+name: repository-validation
+description: Validate changes before Codex finishes implementation. Runs safe local checks without accessing remote state or mutating live resources.
+---
 
-### 7.3 Add the issue-to-PR caller
+# Validate repository changes
 
-Create `.github/workflows/codex-issue-fix.yml` on the default branch:
+The trusted workflow runs `scripts/setup.sh` before Codex starts. Codex must not
+run provider-facing validation inside its restricted sandbox. After Codex
+returns, the controller runs the protected baseline copy of
+`scripts/validate.sh` on the trusted GitHub runner. Repository CI remains the
+final merge gate.
+
+The trusted validator runs exactly:
+
+```bash
+terraform -chdir=infra/environments/preprod validate -no-color
+```
+
+Codex returns a blocked/skipped pending placeholder. The controller replaces it
+with the actual result, sends implementation failures through one bounded repair
+turn, and validates once more. Do not run Terraform plan, apply, TFLint, or any
+command requiring cloud credentials or remote state locks.
+````
+
+*(For a Node.js or Python repository, replace the bash commands with `npm test`, `pytest`, `eslint`, `ruff check`, etc.).*
+
+### Step 4.3: Add Optional Toolchain Setup Script (`setup.sh`)
+
+If the disposable runner needs pinned CLI tools, modules, or providers, add a
+`setup.sh` script:
+
+```bash
+mkdir -p .agents/skills/repository-validation/scripts
+```
+
+Create `.agents/skills/repository-validation/scripts/setup.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+runner_temp="${RUNNER_TEMP:?}"
+terraform_version="1.15.8"
+bin_dir="${runner_temp}/codex-validation-bin"
+mkdir -p "$bin_dir"
+
+# Download and verify Terraform
+curl --fail --silent --show-error --location \
+  --output "${runner_temp}/terraform.zip" \
+  "https://releases.hashicorp.com/terraform/${terraform_version}/terraform_${terraform_version}_linux_amd64.zip"
+echo "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d  ${runner_temp}/terraform.zip" | sha256sum --check --status
+unzip -oq "${runner_temp}/terraform.zip" -d "$bin_dir"
+chmod 700 "${bin_dir}/terraform"
+echo "$bin_dir" >> "${GITHUB_PATH:?}"
+
+# Repository-specific setup must also initialize modules/providers with
+# -backend=false, create a lockfile-backed provider mirror, and export its
+# writable TF_DATA_DIR/TF_PLUGIN_CACHE_DIR/TF_CLI_CONFIG_FILE via GITHUB_ENV.
+```
+
+> [!IMPORTANT]
+> Ensure `setup.sh` has executable permissions in Git:
+> ```bash
+> chmod +x .agents/skills/repository-validation/scripts/setup.sh
+> git add --chmod=+x .agents/skills/repository-validation/scripts/setup.sh
+> ```
+
+Add `.agents/skills/repository-validation/scripts/validate.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  command) echo 'terraform -chdir=infra/environments/preprod validate -no-color' ;;
+  run) terraform -chdir="$2/infra/environments/preprod" validate -no-color ;;
+  *) exit 2 ;;
+esac
+```
+
+Commit it with executable mode as well. The interface is `command` plus
+`run <repository-root>`; exit `0` means passed, `1` means failed, and `2` means
+the trusted environment is blocked.
+
+### Step 4.4: Add the Issue Fix Caller Workflow
+
+Create `.github/workflows/codex-issue-fix.yml`:
 
 ```yaml
-name: Codex Issue Fix
+name: 🤖 Codex Issue Fix
 
 on:
   issues:
@@ -492,35 +413,34 @@ permissions:
 
 jobs:
   issue-fix:
+    # Trigger only on implementation issues with a Target branch heading,
+    # or when maintainer approval label is added.
     if: >-
       contains(github.event.issue.body, '### Target branch') &&
       ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
        github.event.label.name == 'codex-run-approved')
-    uses: NEW_ORG/.github/.github/workflows/reusable-codex-issue-fix.yml@CENTRAL_SHA
+    uses: NEW_ORG/.github/.github/workflows/reusable-codex-issue-fix.yml@main
     with:
-      automation_ref: CENTRAL_SHA
+      automation_ref: main
       approval_label: codex-run-approved
       request_label: codex-run-requested
-      enable_aws_mcp: false
-      enable_terraform_mcp: false
+      # Set to true for infrastructure repos requiring AWS / Terraform MCP tools
+      enable_aws_mcp: true
+      enable_terraform_mcp: true
     secrets:
       CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
       CLIENT_ID: ${{ secrets.CLIENT_ID }}
       PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
 ```
 
-Replace both `CENTRAL_SHA` values with the same full SHA. Do not use
-`secrets: inherit`.
+> [!IMPORTANT]
+> **Why `NEW_ORG` must be static in `jobs.<job_id>.uses` (GitHub Actions Limitation):**
+> You **cannot** use dynamic expressions like `${{ github.repository_owner }}` in the `uses:` line of caller workflows.
+> - GitHub Actions parses `uses:` during workflow graph compilation before runtime contexts exist. Trying to use an expression in `uses:` will cause GitHub to error: `The workflow is not valid. The uses attribute cannot contain expressions.`
+> - Therefore, `jobs.issue-fix.uses` must always specify your organization name as an exact static string (e.g. `NEW_ORG/.github/...` or `Ai-Automation-testing-01/.github/...`).
+> - Inside the central workflow steps, expressions *are* supported, which is why the central reusable workflow dynamically checks out `${{ github.repository_owner }}/.github` without hardcoding.
 
-Enable only the MCP servers the target repository needs. For an AWS/Terraform
-infrastructure repository, set both inputs to `true`; leave them `false` for
-repositories that do not need those tools.
-
-The workflow creates its labels. A maintainer-authored implementation issue is
-auto-approved. A contributor issue gets `codex-run-requested`; a current
-maintainer must add `codex-run-approved`. Editing it invalidates old approval.
-
-### 7.4 Add the review-fix caller
+### Step 4.5: Add the Review-Fix Caller Workflow
 
 Create `.github/workflows/codex-review-fix.yml`:
 
@@ -533,265 +453,189 @@ on:
 
 jobs:
   loop:
+    # Restrict strictly to same-repository pull requests
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: write
       pull-requests: write
-    uses: NEW_ORG/.github/.github/workflows/reusable-codex-review-fix.yml@CENTRAL_SHA
+    uses: NEW_ORG/.github/.github/workflows/reusable-codex-review-fix.yml@main
     with:
-      automation_ref: CENTRAL_SHA
-      profile: ""
+      automation_ref: main
+      profile: infrastructure # Optional caller metadata
     secrets:
       CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
       CLIENT_ID: ${{ secrets.CLIENT_ID }}
       PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
 ```
 
-The same-repository condition is mandatory. Fork PR code must not receive Codex
-or App credentials. Do not switch to `pull_request_target` without a separate
-threat model and redesign.
+### Step 4.6: Verify Issue Templates & Understand Approval Gates
 
-`profile` is optional caller metadata and does not select commands or paths.
-Keep optional round/deletion inputs at defaults until a pilot proves a change is
-needed.
+In `TARGET_REPO` on GitHub, click **Issues** → **New Issue**. You should see the inherited forms:
+- 🐛 **Bug report**
+- 🚀 **Feature request**
+- 🛠️ **Technical task**
+- 💬 **General issue or discussion**
+- 📝 **Blank issue** (if enabled in repo)
 
-### 7.5 Keep normal CI separate
+#### Which forms trigger Codex Auto-Fix?
 
-Do not move normal test/build/deployment logic into Codex callers. Existing CI
-continues to run on `pull_request` and remains required. App publication makes
-the created PR and bot pushes produce normal events. The review workflow's
-commit-message guard prevents its own `synchronize` event from starting another
-review loop; it does not suppress test/build workflows.
+The workflow checks for the required markdown heading `### Target branch` before triggering:
 
-### 7.6 Check inherited issue forms
+| Issue Template | Triggers Codex Auto-Fix? | Why? |
+|---|:---:|---|
+| 🐛 **Bug report** | **YES** | Contains mandatory `Target branch` field. Generates a branch and PR with bugfix. |
+| 🚀 **Feature request** | **YES** | Contains mandatory `Target branch` field. Generates a branch and PR with new feature. |
+| 🛠️ **Technical task** | **YES** | Contains mandatory `Target branch` field. Generates a branch and PR with refactoring/task work. |
+| 💬 **General issue or discussion** | ❌ **NO** | Deliberately has **no `Target branch`**. Used for questions/planning; ignored by automation. |
+| 📝 **Blank issue** | ❌ **NO** | Has no pre-set headings or `Target branch`. Ignored by automation. |
 
-Open `TARGET_REPO` → **Issues** → **New issue**. Confirm:
+#### Issue Approval & Execution Rules
 
-- Bug report;
-- Feature request;
-- Technical task; and
-- General issue or discussion.
+For the 3 implementation forms (Bug, Feature, Task), execution depends on author permissions:
 
-If absent, inspect `TARGET_REPO/.github/ISSUE_TEMPLATE`. Any local template or
-`config.yml` makes GitHub ignore the inherited set. Remove the local set or
-copy/adapt all central forms locally.
+1. **Maintainer / Admin Authors:**
+   - If an issue is opened by a user with `admin` or `maintain` repository permissions, it is **automatically approved**.
+   - The workflow adds the `codex-run-approved` label and starts the coding sandbox immediately.
+2. **External Contributor Authors:**
+   - If opened by an external contributor or non-maintainer, the workflow tags the issue with **`codex-run-requested`**.
+   - **Codex does NOT run yet.** The workflow halts safely without touching code.
+   - A maintainer must review the issue and manually apply the **`codex-run-approved`** label to authorize Codex execution.
+3. **Safety on Edit (Invalidation):**
+   - If an external contributor edits an approved issue, the workflow automatically revokes approval by removing `codex-run-approved` and re-applying `codex-run-requested`, preventing unauthorized prompt injection.
 
-Implementation forms must preserve exact title prefixes and rendered headings
-checked by `verify-issue.js`, especially **Target branch** and the exact Safety
-check sentence. Discussion intentionally has no Target branch.
+> [!NOTE]
+> If inherited templates do not appear under **New Issue**, check whether `TARGET_REPO` contains a local `.github/ISSUE_TEMPLATE` directory. If any local issue template exists, GitHub suppresses all inherited templates. Either remove the local templates or copy the central ones locally.
 
-## 8. Configure target-repository settings
+### Step 4.7: Configure Branch Protection & Repository Rulesets
 
-### 8.1 Actions policy
+In `TARGET_REPO` → **Settings** → **Rules** → **Rulesets** (or **Branches**):
+1. Protect your default branch (`main`).
+2. Require a pull request before merging:
+   - Require **at least 1 human approval**.
+   - Dismiss stale pull request approvals when new commits are pushed.
+3. Require status checks to pass before merging:
+   - Select your authoritative repository CI workflow (build, test, lint).
+4. **Do not exempt the GitHub App from required checks or human approval.**
 
-In **Settings** → **Actions** → **General**:
+---
 
-- enable Actions;
-- allow pinned GitHub actions and `NEW_ORG/.github` workflows;
-- keep default permissions minimal—the callers explicitly declare theirs;
-- never expose Actions secrets to fork PR workflows.
+## Phase 5: End-to-End Verification & Pilot Testing
 
-A reusable workflow cannot elevate its caller's `GITHUB_TOKEN`; nested
-permissions can only stay the same or become more restrictive. See
-[reusable workflow access and permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
+Validate the entire pipeline using this sequential testing procedure.
 
-**Allow GitHub Actions to create and approve pull requests** is not required
-here because PR publication uses the separate App token. Do not enable automated
-approval unless another reviewed workflow needs it.
-
-### 8.2 Rulesets and branch protection
-
-Configure rules so:
-
-- `codex/issue-*` branches may be created/updated by the App;
-- the App can fast-forward fix commits to same-repository PR branches;
-- required test/build/security checks run and must pass;
-- at least one human approval is required;
-- approvals are dismissed or re-review required after bot pushes as appropriate;
-- the App cannot bypass merge review or protected-environment deployment.
-
-Do not exempt the App from all rules. If a push is rejected, add only the
-narrowest reviewed bypass.
-
-### 8.3 Secret and App access
-
-Confirm all four independently:
-
-1. App installation includes `TARGET_REPO`.
-2. `CLIENT_ID` secret access includes it.
-3. `PRIVATE_KEY` secret access includes it.
-4. `CODEX_AUTH_JSON` secret access includes it.
-
-Adding a repository to the App does not grant secrets and vice versa.
-
-## 9. Validate before rollout
-
-### 9.1 Central static checks
-
-From destination `.github`:
-
-```bash
-bash -n automation/codex-issue-fix/run-agent.sh
-bash -n automation/codex-review-fix/run-loop.sh
-node --check automation/codex-issue-fix/verify-issue.js
-ruby -e 'require "yaml"; Dir[".github/**/*.yml"].each { |f| YAML.load_file(f) }; puts "YAML parsed"'
-git diff --check
-grep -RIn 'IndiaCommunityAnimals' --exclude-dir=.git .
+```text
+┌───────────────────────┐    ┌───────────────────────┐    ┌───────────────────────┐
+│  Test 1: Maintainer   │───►│  Test 2: Contributor  │───►│ Test 3: Invalidation  │
+│  Auto-Approval & PR   │    │  Approval Gate Check  │    │  On Contributor Edit  │
+└───────────────────────┘    └───────────────────────┘    └───────────────────────┘
+                                                                      │
+┌───────────────────────┐    ┌───────────────────────┐                │
+│  Test 5: Fork & Gate  │◄───│  Test 4: PR Review-   │◄───────────────┘
+│  Safety Validation    │    │  Fix Autonomous Loop  │
+└───────────────────────┘    └───────────────────────┘
 ```
 
-The final grep should be empty unless a migration note deliberately names the
-source organization.
+### Test 1: Maintainer Implementation Issue
+1. As a repo maintainer, open a new **Technical task** issue.
+2. Under **Target branch**, enter `main` (or an active feature branch).
+3. Specify a small, clear change (e.g. updating a documentation comment or adding a variable description in Terraform).
+4. Submit the issue.
+5. **Expected Results:**
+   - The workflow starts immediately.
+   - The issue automatically receives the `codex-run-approved` label.
+   - The runner executes `setup.sh`, runs Codex, executes validation from `SKILL.md`.
+   - The GitHub App creates branch `codex/issue-<ID>` and opens a pull request.
+   - When validation passes, the issue is updated with a summary comment and
+     labeled `codex-run-completed`; incomplete validation instead creates a draft
+     PR and applies `codex-run-validation-blocked`.
 
-Manually review:
+### Test 2: Contributor Approval Gate
+1. Have a non-collaborator or test account open an implementation issue.
+2. **Expected Results:**
+   - The issue receives `codex-run-requested`.
+   - Codex **does not run**.
+3. Now, as a maintainer, manually add the label `codex-run-approved`.
+4. **Expected Results:**
+   - The workflow re-triggers and proceeds with implementation and PR creation.
 
-- exact central repository owner/path;
-- matching full `CENTRAL_SHA` values;
-- explicit secret forwarding;
-- caller/reusable permissions;
-- same-repository PR restriction;
-- protected paths and secret scan;
-- pinned actions/tools and checksum;
-- absence of merge/deployment commands.
+### Test 3: Edit Invalidation Check
+1. On an approved contributor issue, edit the issue body as the contributor.
+2. **Expected Results:**
+   - The workflow detects the edit and automatically removes `codex-run-approved`, restoring `codex-run-requested`.
 
-### 9.2 Target repository checks
+### Test 4: PR Review-Fix Loop
+1. Open a pull request against `main` with a small syntax or style finding (e.g. missing required formatting or lint rule).
+2. **Expected Results:**
+   - Workflow `Codex Review-Fix Loop` triggers.
+   - Reviewer agent spots the discrepancy.
+   - Fixer agent resolves it, validates via `SKILL.md`, and commits:
+     ```text
+     Apply Codex auto-fix round 1 [codex-autofix]
+     ```
+   - The guard detects `[codex-autofix]` and halts recursive execution.
+   - An evidence comment is posted on the PR detailing the findings and validation output.
 
-For each target:
+### Test 5: Fork & Validation Negative Tests
+1. **Fork PR Test:** Open a PR from a fork repository.
+   - *Result:* The review-fix workflow skips immediately (`if` condition evaluates to false); secrets are never exposed.
+2. **Validation Failure Test:** Introduce an unfixable syntax error in an issue request.
+   - *Result:* Codex validation fails. The workflow does **not** create a PR and marks the issue with `codex-run-failed`.
 
-```bash
-bash -n .agents/skills/repository-validation/scripts/setup.sh   # if present
-bash -n .agents/skills/repository-validation/scripts/cleanup.sh # if present
-git diff --check
-```
+---
 
-Parse both caller YAML files and run all normal repository checks documented by
-its `AGENTS.md` and validation skill.
+## Phase 6: Maintenance, Rotation & Troubleshooting
 
-### 9.3 Live pilot
+### Credential Rotation Runbooks
 
-Use a low-risk private pilot repository.
+#### Rotating GitHub App Private Key
+1. Go to `NEW_ORG` → **Settings** → **Developer settings** → **GitHub Apps** → Select your App.
+2. Scroll to **Private keys** and click **Generate a private key**.
+3. Update the `PRIVATE_KEY` organization secret with the new `.pem` content.
+4. Run a pilot test to confirm token minting works.
+5. Delete the old private key from the GitHub App settings.
 
-1. **Inherited forms:** all four appear.
-2. **Maintainer issue:** open a small Technical task against an existing test
-   branch. Confirm approval, disposable implementation, validation, secret
-   scan, App-authored `codex/issue-N` branch, PR, and result comment.
-3. **Contributor approval:** confirm `codex-run-requested` and no Codex run
-   until a maintainer adds `codex-run-approved`.
-4. **Edit invalidation:** edit after approval and confirm approval is removed.
-5. **Review-fix:** open a safe same-repository PR; confirm review, negotiation,
-   validation, App push, and updated comment.
-6. **Recursion:** confirm `[codex-autofix]` does not start another review loop
-   while normal CI still runs.
-7. **Fork boundary:** confirm fork PR review-fix is skipped and gets no secrets.
-8. **Human gate:** confirm no merge/deployment without normal policy.
+#### Rotating `CODEX_AUTH_JSON`
+If Codex sessions expire or return `401 Unauthorized`:
+1. On your trusted workstation, run:
+   ```bash
+   codex login
+   ```
+2. Re-upload the refreshed file:
+   ```bash
+   gh secret set CODEX_AUTH_JSON --org NEW_ORG --repos "TARGET_REPOS" < ~/.codex/auth.json
+   ```
 
-Inspect every step and actor, not only the final comment.
+---
 
-## 10. Roll out to more repositories
+### Troubleshooting Matrix
 
-For each repository:
-
-1. Add repository `AGENTS.md` and validation skill.
-2. Add callers pinned to reviewed `CENTRAL_SHA`.
-3. Add the repository to the App installation.
-4. Add it to all three secret access lists.
-5. Verify Actions policies and rulesets.
-6. Confirm inherited/local issue forms.
-7. Run a low-risk issue and PR pilot.
-8. Require normal CI and human review.
-
-Do not grant App or secret access to every repository by default.
-
-## 11. Update central automation safely
-
-Treat each central change as a supply-chain change:
-
-1. Open a PR in `NEW_ORG/.github`.
-2. Review scripts, prompts, permissions, pins, downloads, and checksums.
-3. Run static checks and pilot.
-4. Merge and record the new full SHA.
-5. Update every caller's `uses:` and `automation_ref` together.
-6. Roll out to one pilot before bulk updates.
-
-Never update only one ref. Avoid mutable `@main` during normal operation.
-
-## 12. Rotation and incident response
-
-### 12.1 GitHub App key rotation
-
-1. Generate a second key.
-2. Update `PRIVATE_KEY`.
-3. Pilot token minting and a harmless publish.
-4. Delete the old key.
-
-If compromised, remove repository access or suspend the installation, rotate,
-review App-authored activity, and restore only after investigation.
-
-### 12.2 Codex credential rotation
-
-Rerun `codex login` and replace `CODEX_AUTH_JSON`. If no review output is
-produced, inspect the Codex log tail; never interpret an empty response as clean.
-
-### 12.3 Secret exposure
-
-If a secret appears in source, issue/PR content, logs, or an artifact:
-
-1. revoke/rotate immediately;
-2. disable the workflow/App installation if necessary;
-3. remove content/history per incident procedure;
-4. inspect audit/workflow logs;
-5. restore only after scope and new credentials are verified.
-
-## 13. Troubleshooting
-
-| Symptom | Likely cause | Check |
+| Symptom | Root Cause | Immediate Fix |
 |---|---|---|
-| Reusable workflow inaccessible | Wrong owner/path/ref or Actions access | Verify `NEW_ORG/.github/.github/workflows/...@CENTRAL_SHA` and policies |
-| Forms absent | Central visibility/default branch wrong or local templates override | Check special `.github` rules and target `.github/ISSUE_TEMPLATE` |
-| Issue runs but Codex skips | Invalid form, no approval, missing branch, or existing issue PR | Read marked verification comment |
-| `Resource not accessible by integration` | Caller token or App permission too narrow | Match failing step to caller/App permissions |
-| App-token Not Found | App not installed, wrong Client ID, or repo omitted | Check installation and Client ID (not App ID) |
-| App key/signature error | Incomplete PEM, mismatched ID/key, or deleted key | Replace with complete matching PEM |
-| Secret empty | Repo not selected, name mismatch, or caller did not forward | Check all access lists and exact names |
-| Codex empty/`401` | `CODEX_AUTH_JSON` stale/invalid or CLI failed | Rerun login, replace secret, inspect log |
-| Setup stops issue job | Skill absent, script not executable/failed, or changed files | Fix validation skill and modes |
-| Provider validation fails inside Codex | Provider process cannot run in the restricted sandbox | Prepare the runtime in `setup.sh` and execute the protected check through `validate.sh` on the trusted runner |
-| Candidate rejected | Protected path, schema, or Gitleaks gate | Inspect implementation logs; do not bypass |
-| PR created but CI absent | Wrong actor/token, policy, filters, or caller missing on default branch | Confirm App token and normal `pull_request` CI |
-| Review job skipped | Fork PR or bot `[codex-autofix]` event | Expected; inspect condition/guard |
-| Review push rejected | Branch moved/rules block App/workflow-file permission required | Re-run current head or narrowly change rule |
-| Gate A reverts fix | Finding did not cite each changed file as `file:line` | Improve finding, not gate |
-| Several runs appear | App PR/push triggers normal CI and queued review | Confirm concurrency/guard; keep unrelated CI |
+| **Reusable workflow not found (404)** | Central `.github` repo access not configured, or branch/SHA mismatch | Go to `NEW_ORG/.github` → Settings → Actions → General → Set Access to *Accessible from repositories in organization*. Check `uses:` ref. |
+| **Issue forms do not appear** | Target repository has a local `.github/ISSUE_TEMPLATE` folder | Remove target repo's local templates or copy the central templates locally. |
+| **Workflow starts but Codex never runs** | Missing `### Target branch` heading, invalid branch name, or pending approval | Check issue body for the exact markdown heading `### Target branch` with an existing branch. If contributor, add label `codex-run-approved`. |
+| **Resource not accessible by integration** | GitHub App missing permissions or caller permissions too narrow | In GitHub App settings, verify `Contents: write` and `Pull requests: write`. In caller workflow, verify permissions block includes `contents: write`, `pull-requests: write`, `issues: write`. |
+| **`actions/create-github-app-token` failed: App not found** | Using numeric `App ID` instead of `Client ID` in secret | Check `CLIENT_ID` secret. It must be the alphanumeric Client ID (e.g. `Iv23...`), not the numeric App ID. |
+| **Codex output empty or 401 Unauthorized** | Expired or invalid `CODEX_AUTH_JSON` | Re-authenticate via `codex login` on workstation and update the secret. |
+| **Setup failed: `setup.sh: Permission denied`** | `setup.sh` missing executable bit in Git | Run `chmod +x path/to/setup.sh` and `git add --chmod=+x path/to/setup.sh` then commit. |
+| **Codex completed but no PR was created** | Protected path, secret scan, no-change, or publishing gate rejected the candidate | Check the Actions result comment. Failed or blocked validation alone should now create a draft PR. Codex remains forbidden from modifying `.github/workflows/*`, `.agents/*`, or `.env*`. |
+| **Terraform provider handshake fails in Codex** | Provider processes cannot initialize inside the restricted Codex runtime | Do not execute provider-facing validation in Codex. Prepare it with `setup.sh` and run it through trusted `validate.sh` on the GitHub runner. |
+| **Review-fix runs in an infinite loop** | Commit message guard bypassed or modified | Ensure commit message contains `[codex-autofix]`, which the caller step checks to prevent re-triggering. |
+| **`The uses attribute cannot contain expressions`** | Attempted to use dynamic `${{ github.repository_owner }}` in caller `jobs.<id>.uses` | GitHub Actions strictly requires `jobs.<id>.uses` to be a literal static string. Replace with actual organization name (e.g. `NEW_ORG/.github/...`). |
 
-## 14. Security invariants
+---
 
-Installation is complete only if:
+## Security Invariants Checklist
 
-- central controls come from a reviewed immutable SHA;
-- `uses:` and `automation_ref` match;
-- callers forward only three named secrets, never `secrets: inherit`;
-- fork PRs cannot access credentials;
-- App repository access and permissions are minimum;
-- Codex never receives App token/private key;
-- issue implementation uses a disposable worktree;
-- protected-path and Gitleaks gates run before publication;
-- every target owns a validation skill, any required trusted validator, and normal CI;
-- App cannot merge, deploy, or bypass human review;
-- credentials and access lists are audited/rotated.
+Before approving the setup for production use, verify all 10 security invariants:
 
-## 15. Source map
-
-| Concern | Authoritative file |
-|---|---|
-| Issue form contract | `.github/ISSUE_TEMPLATE/*.yml` |
-| Title/headings/branch verification | `automation/codex-issue-fix/verify-issue.js` |
-| Issue implementation/gates | `automation/codex-issue-fix/run-agent.sh` |
-| Issue result schema | `automation/codex-issue-fix/agent-output.schema.json` |
-| Issue orchestration/publishing | `.github/workflows/reusable-codex-issue-fix.yml` |
-| Review criteria | `automation/codex-review-fix/prompts/review.md` |
-| Review/fix negotiation/gates | `automation/codex-review-fix/run-loop.sh` |
-| Review orchestration/publishing | `.github/workflows/reusable-codex-review-fix.yml` |
-| Repository checks | Target `.agents/skills/repository-validation/SKILL.md` |
-| Repository events/permissions | Target `.github/workflows/codex-*.yml` |
-
-When code and docs disagree, stop rollout, inspect reviewed source, and update
-both in the same PR.
+- [ ] **Supply-Chain Pinning:** Reusable workflow and `automation_ref` use a reviewed immutable commit SHA or controlled branch.
+- [ ] **Explicit Secrets:** Callers pass only `CLIENT_ID`, `PRIVATE_KEY`, and `CODEX_AUTH_JSON`; `secrets: inherit` is never used.
+- [ ] **Isolated Worktree:** Issue implementation runs in a disposable directory; GitHub tokens are not exposed to Codex.
+- [ ] **Validation Gate:** Only `validation.status === 'passed'` creates a review-ready PR; failed or blocked validation can create only a clearly labelled draft PR. Shipped changes still require normal required checks and human review.
+- [ ] **Protected Paths:** Codex cannot modify `.github/workflows/`, `.agents/`, `.codex/`, or `.env` files.
+- [ ] **Secret Scanning:** All diffs pass Gitleaks scanning before the GitHub App publishes any branch or PR.
+- [ ] **Fork Boundary:** Fork PRs are strictly excluded from receiving App tokens or Codex credentials.
+- [ ] **Same-Repository Boundary:** Review-fix loop enforces `head.repo.full_name == github.repository`.
+- [ ] **Human Review Mandatory:** Branch rules require at least one human approval; the automation bot cannot merge.
+- [ ] **Zero Cloud Mutation:** Validation and agent prompts strictly forbid running deploy, apply, or state modification commands.

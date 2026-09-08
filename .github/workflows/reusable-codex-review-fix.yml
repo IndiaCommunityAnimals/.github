@@ -15,7 +15,7 @@ on:
         type: string
       # Keep script checkout aligned with the reusable workflow reference.
       automation_ref:
-        description: Branch, tag, or SHA in IndiaCommunityAnimals/.github
+        description: Branch, tag, or SHA in the organization .github repository
         required: false
         default: main
         type: string
@@ -100,7 +100,7 @@ jobs:
       - name: Check out trusted organization automation
         uses: actions/checkout@v6
         with:
-          repository: IndiaCommunityAnimals/.github
+          repository: ${{ github.repository_owner }}/.github
           ref: ${{ inputs.automation_ref }}
           path: organization-automation
           fetch-depth: 1
