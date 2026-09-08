@@ -15,7 +15,7 @@ Neither pipeline merges PRs, approves PRs, deploys infrastructure, runs
 Terraform apply/destroy, migrates production data, or replaces human review.
 
 To reproduce this system in a different GitHub organization, follow the
-[organization-wide bootstrap runbook](organization-codex-ci-bootstrap.md) for
+[organization-wide bootstrap runbook](../README.md) for
 GitHub App registration, credentials, central files, callers, and rollout.
 
 ## 1. Repository layout and ownership
