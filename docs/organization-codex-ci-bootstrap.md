@@ -36,7 +36,7 @@ NEW_ORG/each-target-repository
 ├── .github/workflows/codex-review-fix.yml    # local pull_request event caller
 ├── .agents/skills/repository-validation/
 │   ├── SKILL.md                              # exact repository checks (required)
-│   └── scripts/                              # optional setup.sh and cleanup.sh
+│   └── scripts/                              # optional setup/validate/cleanup scripts
 ├── AGENTS.md                                 # repository-specific rules
 └── .github/workflows/<normal-ci>.yml          # tests/builds remain repository-owned
 ```
@@ -422,15 +422,19 @@ Create:
 .agents/skills/repository-validation/SKILL.md
 ```
 
-It must list exact commands Codex runs before finishing: locked dependency
+It must define the repository's exact validation contract: locked dependency
 setup, formatting, linting, type checking, tests, build, audit, and safe
 infrastructure validation as appropriate. Commands must use a documented
-working directory and must not deploy or mutate remote services.
+working directory and must not deploy or mutate remote services. When a
+provider-facing check cannot run safely in Codex's restricted sandbox, put it
+behind the trusted `validate.sh` interface described below instead of asking
+Codex to execute it directly.
 
 Optional issue-automation scripts:
 
 ```text
 .agents/skills/repository-validation/scripts/setup.sh
+.agents/skills/repository-validation/scripts/validate.sh
 .agents/skills/repository-validation/scripts/cleanup.sh
 ```
 
@@ -439,6 +443,10 @@ Rules:
 - `setup.sh` runs in the disposable issue worktree before Codex credentials.
   It may install pinned dependencies/tools or prepare an isolated service. It
   must not modify tracked or non-ignored files.
+- `validate.sh` is loaded from the reviewed base commit and runs after Codex on
+  the trusted GitHub runner. It must support `command` and
+  `run <repository-root>`; exit `0` means passed, `1` means failed, and `2`
+  means the trusted environment is blocked.
 - `cleanup.sh` removes only the isolated validation environment and is
   attempted after failures.
 - Commit executable bits:
@@ -451,8 +459,11 @@ Rules:
 - Never include cloud credentials, production tokens, deployment, state, or
   destructive database commands.
 
-The issue controller stops before Codex if the skill is missing. Review-fix
-instructs Codex to use the same skill and report actual results. Normal CI is
+The issue controller stops before Codex if the skill is missing. When
+`validate.sh` exists, Codex returns the skill's pending placeholder and the
+controller replaces it with the actual trusted-runner result. An
+implementation failure is sent through one bounded repair turn and validated
+once more. Review-fix uses the same trusted setup and validator. Normal CI is
 the authoritative independent gate.
 
 ### 7.3 Add the issue-to-PR caller
@@ -735,6 +746,7 @@ If a secret appears in source, issue/PR content, logs, or an artifact:
 | Secret empty | Repo not selected, name mismatch, or caller did not forward | Check all access lists and exact names |
 | Codex empty/`401` | `CODEX_AUTH_JSON` stale/invalid or CLI failed | Rerun login, replace secret, inspect log |
 | Setup stops issue job | Skill absent, script not executable/failed, or changed files | Fix validation skill and modes |
+| Provider validation fails inside Codex | Provider process cannot run in the restricted sandbox | Prepare the runtime in `setup.sh` and execute the protected check through `validate.sh` on the trusted runner |
 | Candidate rejected | Protected path, schema, or Gitleaks gate | Inspect implementation logs; do not bypass |
 | PR created but CI absent | Wrong actor/token, policy, filters, or caller missing on default branch | Confirm App token and normal `pull_request` CI |
 | Review job skipped | Fork PR or bot `[codex-autofix]` event | Expected; inspect condition/guard |
@@ -754,7 +766,7 @@ Installation is complete only if:
 - Codex never receives App token/private key;
 - issue implementation uses a disposable worktree;
 - protected-path and Gitleaks gates run before publication;
-- every target owns a validation skill and normal CI;
+- every target owns a validation skill, any required trusted validator, and normal CI;
 - App cannot merge, deploy, or bypass human review;
 - credentials and access lists are audited/rotated.
 

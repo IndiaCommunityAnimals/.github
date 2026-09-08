@@ -141,6 +141,48 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Tooling setup is repository-owned, but the PR head is untrusted. Load
+      # the executable setup script from the reviewed base commit and run it
+      # against the PR checkout before Codex enters its restricted sandbox.
+      # Values written to GITHUB_PATH/GITHUB_ENV become available to the loop.
+      - name: Prepare repository validation environment
+        if: steps.trigger-guard.outputs.skip != 'true'
+        env:
+          VALIDATION_SETUP_PATH: .agents/skills/repository-validation/scripts/setup.sh
+          VALIDATION_RUNNER_PATH: .agents/skills/repository-validation/scripts/validate.sh
+        run: |
+          setup_object="${BASE_SHA}:${VALIDATION_SETUP_PATH}"
+          if ! git -C "$REPOSITORY_ROOT" cat-file -e "$setup_object" 2>/dev/null; then
+            echo "No repository validation setup script is defined on the PR base."
+          else
+            setup_mode="$(git -C "$REPOSITORY_ROOT" ls-tree "$BASE_SHA" -- \
+              "$VALIDATION_SETUP_PATH" | awk '{print $1}')"
+            if [ "$setup_mode" != "100755" ]; then
+              echo "::error::Repository validation setup script is not executable on the PR base"
+              exit 1
+            fi
+
+            trusted_setup="${RUNNER_TEMP}/repository-validation-setup.sh"
+            git -C "$REPOSITORY_ROOT" show "$setup_object" > "$trusted_setup"
+            chmod 700 "$trusted_setup"
+            "$trusted_setup" "$REPOSITORY_ROOT"
+          fi
+
+          validation_object="${BASE_SHA}:${VALIDATION_RUNNER_PATH}"
+          if git -C "$REPOSITORY_ROOT" cat-file -e "$validation_object" 2>/dev/null; then
+            validation_mode="$(git -C "$REPOSITORY_ROOT" ls-tree "$BASE_SHA" -- \
+              "$VALIDATION_RUNNER_PATH" | awk '{print $1}')"
+            if [ "$validation_mode" != "100755" ]; then
+              echo "::error::Repository validation validate.sh is not executable on the PR base"
+              exit 1
+            fi
+
+            trusted_validator="${RUNNER_TEMP}/repository-validation.sh"
+            git -C "$REPOSITORY_ROOT" show "$validation_object" > "$trusted_validator"
+            chmod 700 "$trusted_validator"
+            echo "REPOSITORY_VALIDATION_RUNNER=$trusted_validator" >> "$GITHUB_ENV"
+          fi
+
       # GitHub-hosted Ubuntu can restrict the user namespaces Bubblewrap needs
       # for Codex's --sandbox workspace-write mode to actually set up (without
       # this, the CLI fails before touching any file — e.g. "bwrap: loopback:

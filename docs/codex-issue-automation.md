@@ -53,7 +53,8 @@ gets `codex-run-requested`; a maintainer-authored issue gets
 Editing a contributor issue removes its previous approval and returns it to the
 request state. Removing an approval label also reruns verification and cannot
 start the agent. Issue runs use `cancel-in-progress: true`, so newer edits or
-label changes supersede older runs.
+label changes supersede older runs. A superseded run does not post an automation
+result or change result labels; the replacement run owns the final issue status.
 
 All forms require a safety confirmation that secrets, credentials, tokens, and
 sensitive personal data were removed. Supporting evidence, dependencies,
@@ -90,24 +91,34 @@ Every caller repository owns its exact implementation-time checks in:
 ```text
 .agents/skills/repository-validation/SKILL.md
 .agents/skills/repository-validation/scripts/setup.sh    # optional
+.agents/skills/repository-validation/scripts/validate.sh # optional trusted gate
 .agents/skills/repository-validation/scripts/cleanup.sh  # optional
 ```
 
 The optional executable setup script may install locked dependencies, download
-pinned tooling, or start an isolated supporting service. It runs in the
-disposable export before Codex or GitHub credentials are restored. It must not
-perform validation or modify tracked/non-ignored files. Cleanup runs after the
-agent attempt even when validation fails.
+pinned tooling, prepare offline dependency mirrors, pre-initialize dependency
+data, or start an isolated supporting service. It runs in the disposable export
+before Codex or GitHub credentials are restored. It must not run the validation
+gates or modify tracked/non-ignored files. Cleanup runs after the agent attempt
+even when validation fails.
 
-Codex discovers this tracked repository skill from the isolated worktree. The
-trusted base prompt explicitly invokes `$repository-validation`, so Codex runs
-the repository's checks and may repair implementation-caused failures within
-its initial turn. If that turn still reports `failed` or `blocked`, the common
-controller secret-scans the structured validation result and sends it back to
-the same Codex thread for one bounded repair turn. The repair turn works in the
-same isolated worktree, reruns the checks, and supplies the final validation
-result. If the thread ID is unavailable, the controller starts one fresh repair
-turn with the original trusted context and the same validation feedback.
+When executable `validate.sh` exists, the controller copies the protected
+baseline version before Codex starts. The script implements `command` to print
+the human-readable command and `run <repository-root>` to execute the gate with
+exit codes `0` (passed), `1` (failed), or `2` (blocked). The controller invokes
+it on the trusted GitHub runner after Codex returns, outside the restricted
+Codex sandbox. This is the supported path for provider processes or validation
+tools that cannot run inside that sandbox.
+
+Codex discovers this tracked repository skill from the isolated worktree. For a
+trusted validator, Codex returns the skill-defined pending placeholder instead
+of starting provider processes. The controller replaces that placeholder with
+the actual runner-side result. If validation fails or is blocked, the common
+controller secret-scans the structured result and sends it back to the same
+Codex thread for one bounded repair turn, then runs the trusted validator again.
+Without `validate.sh`, the legacy contract remains: Codex runs the checks defined
+by the skill. If the thread ID is unavailable, the controller starts one fresh
+repair turn with the original trusted context and validation feedback.
 
 If an environment limitation or existing repository problem still prevents a
 pass after the repair turn, Codex must report the exact command, error, and
@@ -121,10 +132,10 @@ Codex execution when the required skill file is missing.
 
 ## Common and repository-specific responsibilities
 
-The common workflow contains no repository dependency setup, path allowlist,
-test, lint, build, audit, Terraform validation, or validation-reporting command.
-Those instructions live in the target repository's skill so each repository
-owns its implementation and validation contract.
+The common workflow contains no hard-coded repository dependency setup, path
+allowlist, test, lint, build, audit, Terraform validation, or validation command.
+Those instructions and executable gates live in the target repository's skill;
+the common controller only enforces the generic `validate.sh` interface.
 
 The common controller rejects `.agents`, `.github`, agent policy, real
 environment files, and credentials before Git operations. Repository-specific
@@ -146,14 +157,15 @@ The central automation deliberately does not assume React, React Native, Vite,
 Node versions, Python versions, Flask, directory names, package managers, test
 frameworks, database URLs, or fixed validation commands.
 
-Codex must report the checks it actually ran in its implementation summary. The
-workflow includes that summary in the normal pull request. This is agent-reported
-evidence rather than an independent controller gate; repository CI and human
-review remain authoritative and must prevent merge when required checks fail.
+Codex reports checks it actually ran. Results produced by `validate.sh` are
+runner-side controller evidence and replace the agent placeholder before pull
+request publication. Repository CI and human review remain authoritative and
+must prevent merge when required checks fail.
 
 The common job is pinned to `ubuntu-24.04`. Repository-owned setup installs and
 checksum-verifies the exact stack tooling it requires; the infrastructure skill
-owns pinned Terraform and TFLint instead of relying on runner-image contents.
+owns pinned Terraform and its provider mirror instead of relying on runner-image
+contents.
 
 ## Trigger and approval
 
@@ -172,9 +184,10 @@ cannot self-approve by adding the label or editing an old issue.
 
 Generated PRs and issue result comments include the issue author, approving
 maintainer, triggering actor, and GitHub Actions run ID for auditability.
-Completed runs receive `codex-run-completed`; eligible runs that do not publish
-a PR receive `codex-run-failed`. The workflow removes the opposite result label
-so retries cannot leave both states on one issue.
+Validated PRs receive `codex-run-completed`; draft PRs with failed or blocked
+validation receive `codex-run-validation-blocked`; eligible runs that do not
+publish a PR receive `codex-run-failed`. The workflow removes stale result labels
+so retries cannot leave conflicting states on one issue.
 
 ## Required settings
 
@@ -224,15 +237,18 @@ Callers should not use a mutable central branch for long-term operation.
 - Agent makes no change: result comment; no PR.
 - Protected path changed: patch rejected; no PR.
 - Validation skill missing: no Codex run, branch, or PR.
-- Skill validation fails because of the implementation: Codex fixes the change
-  and reruns the skill checks within its turn.
-- Validation cannot pass because of an implementation, environment, or
-  pre-existing problem: Codex reports the exact command and reason, but the
-  controller blocks branch and PR publication.
+- Trusted validation fails because of the implementation: the controller sends
+  the exact runner result to one bounded Codex repair turn and validates again.
+- Validation still fails or is blocked after the bounded repair: Codex reports
+  the exact command and reason; the controller publishes a draft PR and labels
+  the issue `codex-run-validation-blocked`.
+- A prerequisite does not complete: dependent checks are reported as skipped,
+  not as duplicate failures.
 - Secret scan finding in candidate code or the agent report: no branch or PR.
 - PR creation forbidden by settings: branch may exist, job reports the GitHub API failure.
-- Agent produces an accepted patch: one commit on `codex/issue-N`, one normal
-  PR containing the agent's validation report, and one result comment.
+- Agent produces an accepted, validated patch: one commit on `codex/issue-N`,
+  one review-ready PR with a diff-wide change summary and validation report, and
+  one result comment.
 
 ## Local checks
 

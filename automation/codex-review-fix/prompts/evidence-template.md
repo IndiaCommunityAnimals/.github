@@ -6,9 +6,7 @@ states which source PR/branch this is for, how many rounds ran, and why it
 stopped — do NOT duplicate those here (Codex generating this has no access to
 them); only describe what's actually present in the diff.
 -->
-**Validation:** {{VALIDATION_SUMMARY}}  <!-- Codex-reported repository skill commands and results -->
-
----
+<!-- Trusted runner validation is prepended by the controller. -->
 
 ### Change {{N}} — {{MARKER}} {{CATEGORY}} · {{SHORT_TITLE}}
 - **Finding:** {{WHAT_WAS_WRONG}} — `{{FILE}}:{{LINE}}`

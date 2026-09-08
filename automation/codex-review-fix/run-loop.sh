@@ -35,6 +35,7 @@ DELETION_RATIO="${DELETION_RATIO:?}"                   # ...or removes this many
 BASE_SHA="${BASE_SHA:?}"
 SRC_BRANCH="${SRC_BRANCH:?}"           # the PR's own branch — fixes commit and push HERE, no separate branch
 REPOSITORY_ROOT="${REPOSITORY_ROOT:?}" # authenticated checkout of the PR's own branch
+REPOSITORY_VALIDATION_RUNNER="${REPOSITORY_VALIDATION_RUNNER:-}"
 # workspace-write, not the full bypass: confirmed live that it neither hangs
 # nor blocks in-place edits or `codex exec resume` (the negotiation loop's
 # one hard requirement) — the loop's own prompts never ask Codex to touch
@@ -73,6 +74,23 @@ FIX_RULES='- Modify only files required by the agreed findings. Do not infer a r
 - Do not run git commands, deployment commands, or commands that change remote services.
 - Make minimal in-place edits. Do not delete an entire file, function, class, component, or resource.
 - If you notice an unrelated issue, report it in the summary and do not change it.'
+
+if [ -x "$REPOSITORY_VALIDATION_RUNNER" ]; then
+  IFS= read -r -d '' VALIDATION_RULES <<'VALIDATION_RULES_EOF' || :
+The trusted controller runs repository validation outside
+the Codex sandbox after your fixes. Do not run setup.sh or repository validation
+commands yourself, and do not claim that validation passed.
+VALIDATION_RULES_EOF
+else
+  IFS= read -r -d '' VALIDATION_RULES <<'VALIDATION_RULES_EOF' || :
+Before finishing, read and use the target repository's
+`.agents/skills/repository-validation/SKILL.md`. Run every command it defines.
+The trusted workflow already ran any setup.sh; do not run setup again.
+If a command fails because of your implementation, make one smallest repair
+and rerun the required checks once. Do not claim success when a dependency or
+environment problem prevents validation; report the exact command and result.
+VALIDATION_RULES_EOF
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${RUNNER_TEMP:-/tmp}/codex-review-fix"; mkdir -p "$WORK"
@@ -290,13 +308,7 @@ decide.
 Rules:
 $FIX_RULES
 
-Before finishing, read and use the target repository's
-`.agents/skills/repository-validation/SKILL.md`. Run every command it defines.
-If that skill provides an executable `scripts/setup.sh`, run it before the
-checks so dependencies and tools are available.
-If a command fails because of your implementation, make one smallest repair
-and rerun the required checks once. Do not claim success when a dependency or
-environment problem prevents validation; report the exact command and result.
+$VALIDATION_RULES
 
 As your final message, list EVERY finding below with a one-line note on what
 you changed for it. If you noticed something else worth flagging that is NOT
@@ -443,7 +455,8 @@ Fill in the template below describing each change: finding, why, the diff
 hunk, and how it was verified — drawing on your own actual reasoning and any
 verification you did while implementing, not just re-reading the diff.
 Describe ONLY what is present in the diff — do not invent changes. If any
-file or code was deleted, flag that prominently.
+file or code was deleted, flag that prominently. Do not add a validation
+summary; the trusted controller appends its runner-side result.
 
 $(cat "$TEMPLATE_FILE")
 
@@ -452,6 +465,52 @@ $(cat "$WORK/final-fix.diff")
 </fix_diff>"
   codex_call FIXER_THREAD "$EVIDENCE" "$EVIDENCE_PROMPT"
   [ -s "$EVIDENCE" ] || echo "_(evidence generation produced no output)_" > "$EVIDENCE"
+
+  if [ -x "$REPOSITORY_VALIDATION_RUNNER" ]; then
+    VALIDATION_LOG="$WORK/repository-validation.log"
+    VALIDATION_COMMAND="repository validation"
+    VALIDATION_EXIT=0
+    : > "$VALIDATION_LOG"
+    if ! VALIDATION_COMMAND="$(
+      "$REPOSITORY_VALIDATION_RUNNER" command 2> "$VALIDATION_LOG"
+    )" || [ -z "$VALIDATION_COMMAND" ]; then
+      VALIDATION_COMMAND="repository validation"
+      VALIDATION_EXIT=2
+    else
+      "$REPOSITORY_VALIDATION_RUNNER" run "$REPOSITORY_ROOT" \
+        > "$VALIDATION_LOG" 2>&1 || VALIDATION_EXIT=$?
+    fi
+
+    SAFE_VALIDATION_COMMAND="$(printf '%s' "$VALIDATION_COMMAND" | sed 's/`/\\`/g')"
+    VALIDATION_REPORT="$WORK/repository-validation.md"
+    case "$VALIDATION_EXIT" in
+      0)
+        printf '**Validation:** Passed — `%s`.\n' \
+          "$SAFE_VALIDATION_COMMAND" > "$VALIDATION_REPORT"
+        ;;
+      2)
+        printf '**Validation:** Blocked — `%s` could not run in the trusted runner.\n' \
+          "$SAFE_VALIDATION_COMMAND" > "$VALIDATION_REPORT"
+        ;;
+      *)
+        printf '**Validation:** Failed — `%s` exited %s in the trusted runner.\n' \
+          "$SAFE_VALIDATION_COMMAND" "$VALIDATION_EXIT" > "$VALIDATION_REPORT"
+        ;;
+    esac
+    if [ "$VALIDATION_EXIT" -ne 0 ] && [ -s "$VALIDATION_LOG" ]; then
+      {
+        echo
+        tail -n 40 "$VALIDATION_LOG" | sed 's/^/> /'
+      } >> "$VALIDATION_REPORT"
+    fi
+
+    {
+      cat "$VALIDATION_REPORT"
+      echo
+      cat "$EVIDENCE"
+    } > "${EVIDENCE}.trusted"
+    mv "${EVIDENCE}.trusted" "$EVIDENCE"
+  fi
 fi
 
 {
